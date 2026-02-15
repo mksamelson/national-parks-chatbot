@@ -125,14 +125,14 @@ def create_chunks_from_park_data(park_file: Path) -> List[Dict]:
 
     # Create chunk objects with metadata
     chunks = []
-    for idx, chunk_text in enumerate(text_chunks):
-        chunk = {
+    for idx, chunk in enumerate(text_chunks):
+        chunk_obj = {
             "id": f"{park_code}_chunk_{idx}",
             "park_code": park_code,
             "park_name": park_name,
             "chunk_index": idx,
-            "text": chunk_text,
-            "token_count": count_tokens_approx(chunk_text),
+            "text": chunk,
+            "token_count": count_tokens_approx(chunk),
             "source_url": f"https://www.nps.gov/{park_code}/index.htm",
             "metadata": {
                 "park_code": park_code,
@@ -140,9 +140,111 @@ def create_chunks_from_park_data(park_file: Path) -> List[Dict]:
                 "chunk_index": idx,
             }
         }
-        chunks.append(chunk)
+        chunks.append(chunk_obj)
 
     return chunks
+
+
+def process_wikipedia_data():
+    """Process Wikipedia articles if available"""
+    wiki_dir = Path("../data/raw/wikipedia")
+    if not wiki_dir.exists():
+        return []
+
+    wiki_files = list(wiki_dir.glob("*_wikipedia.json"))
+    if not wiki_files:
+        return []
+
+    print(f"\nProcessing {len(wiki_files)} Wikipedia articles...")
+    all_chunks = []
+
+    for wiki_file in tqdm(wiki_files):
+        with open(wiki_file, 'r', encoding='utf-8') as f:
+            wiki_data = json.load(f)
+
+        park_code = wiki_data.get("park_code", "unknown")
+        park_name = wiki_data.get("title", park_code.upper())
+        text = wiki_data.get("text", "")
+
+        if not text:
+            continue
+
+        # Chunk the text
+        text_chunks = chunk_text(text)
+
+        # Create chunk objects
+        for idx, chunk in enumerate(text_chunks):
+            chunk_obj = {
+                "id": f"{park_code}_wiki_chunk_{idx}",
+                "park_code": park_code,
+                "park_name": park_name,
+                "chunk_index": idx,
+                "text": chunk,
+                "token_count": count_tokens_approx(chunk),
+                "source_url": wiki_data.get("url", f"https://en.wikipedia.org/wiki/{park_name}"),
+                "source_type": "wikipedia",
+                "metadata": {
+                    "park_code": park_code,
+                    "park_name": park_name,
+                    "chunk_index": idx,
+                    "source": "wikipedia"
+                }
+            }
+            all_chunks.append(chunk_obj)
+
+    print(f"  ✓ Created {len(all_chunks)} chunks from Wikipedia")
+    return all_chunks
+
+
+def process_pdf_texts():
+    """Process extracted PDF texts if available"""
+    pdf_text_dir = Path("../data/raw/pdf_texts")
+    if not pdf_text_dir.exists():
+        return []
+
+    text_files = list(pdf_text_dir.glob("*.txt"))
+    if not text_files:
+        return []
+
+    print(f"\nProcessing {len(text_files)} PDF text files...")
+    all_chunks = []
+
+    for text_file in tqdm(text_files):
+        # Extract park code from filename (e.g., "yose_brochure.txt" -> "yose")
+        filename = text_file.stem
+        park_code = filename.split('_')[0] if '_' in filename else filename
+
+        with open(text_file, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        if not text or len(text) < 100:
+            continue
+
+        # Chunk the text
+        text_chunks = chunk_text(text)
+
+        # Create chunk objects
+        for idx, chunk in enumerate(text_chunks):
+            chunk_obj = {
+                "id": f"{park_code}_pdf_chunk_{idx}",
+                "park_code": park_code,
+                "park_name": park_code.upper(),
+                "chunk_index": idx,
+                "text": chunk,
+                "token_count": count_tokens_approx(chunk),
+                "source_url": f"https://www.nps.gov/{park_code}/planyourvisit/brochures.htm",
+                "source_type": "pdf",
+                "metadata": {
+                    "park_code": park_code,
+                    "chunk_index": idx,
+                    "source": "pdf",
+                    "original_file": text_file.name
+                }
+            }
+            all_chunks.append(chunk_obj)
+
+    print(f"  ✓ Created {len(all_chunks)} chunks from PDFs")
+    return all_chunks
 
 
 def process_all_parks():
@@ -163,9 +265,11 @@ def process_all_parks():
     stats = {
         "total_parks": len(park_files),
         "total_chunks": 0,
-        "total_tokens": 0
+        "total_tokens": 0,
+        "chunks_by_source": {}
     }
 
+    # Process NPS data
     for park_file in tqdm(park_files):
         chunks = create_chunks_from_park_data(park_file)
         all_chunks.extend(chunks)
@@ -178,6 +282,24 @@ def process_all_parks():
         output_file = OUTPUT_DIR / f"{park_code}_chunks.json"
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(chunks, f, indent=2, ensure_ascii=False)
+
+    stats["chunks_by_source"]["nps"] = len(all_chunks)
+
+    # Process Wikipedia data
+    wiki_chunks = process_wikipedia_data()
+    if wiki_chunks:
+        all_chunks.extend(wiki_chunks)
+        stats["total_chunks"] += len(wiki_chunks)
+        stats["total_tokens"] += sum(c["token_count"] for c in wiki_chunks)
+        stats["chunks_by_source"]["wikipedia"] = len(wiki_chunks)
+
+    # Process PDF texts
+    pdf_chunks = process_pdf_texts()
+    if pdf_chunks:
+        all_chunks.extend(pdf_chunks)
+        stats["total_chunks"] += len(pdf_chunks)
+        stats["total_tokens"] += sum(c["token_count"] for c in pdf_chunks)
+        stats["chunks_by_source"]["pdf"] = len(pdf_chunks)
 
     # Save all chunks combined
     combined_file = OUTPUT_DIR / "all_chunks.json"
@@ -194,6 +316,10 @@ def process_all_parks():
     print(f"✓ Total chunks: {stats['total_chunks']}")
     print(f"✓ Total tokens (approx): {stats['total_tokens']:,}")
     print(f"✓ Average chunks per park: {stats['total_chunks'] / stats['total_parks']:.1f}")
+    if stats.get("chunks_by_source"):
+        print(f"\nChunks by source:")
+        for source, count in stats["chunks_by_source"].items():
+            print(f"  - {source}: {count} chunks")
     print(f"✓ Output directory: {OUTPUT_DIR}")
 
 
