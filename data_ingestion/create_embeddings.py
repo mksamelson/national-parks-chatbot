@@ -156,23 +156,27 @@ def test_retrieval(client: QdrantClient, model: SentenceTransformer):
     for query in test_queries:
         print(f"\nQuery: {query}")
 
-        # Embed query
-        query_vector = model.encode(query).tolist()
+        try:
+            # Embed query
+            query_vector = model.encode(query).tolist()
 
-        # Search
-        results = client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
-            limit=3
-        )
+            # Search (using correct Qdrant API)
+            results = client.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=query_vector,
+                limit=3
+            )
 
-        print(f"Top {len(results)} results:")
-        for idx, result in enumerate(results, 1):
-            park_name = result.payload.get("park_name", "Unknown")
-            text_preview = result.payload.get("text", "")[:100] + "..."
-            score = result.score
-            print(f"  {idx}. {park_name} (score: {score:.3f})")
-            print(f"     {text_preview}")
+            print(f"Top {len(results)} results:")
+            for idx, result in enumerate(results, 1):
+                park_name = result.payload.get("park_name", "Unknown")
+                text_preview = result.payload.get("text", "")[:100] + "..."
+                score = result.score
+                print(f"  {idx}. {park_name} (score: {score:.3f})")
+                print(f"     {text_preview}")
+
+        except Exception as e:
+            print(f"  ✗ Error testing query: {e}")
 
 
 def main():
