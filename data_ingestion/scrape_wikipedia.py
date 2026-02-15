@@ -52,8 +52,13 @@ def fetch_wikipedia_article(article_title: str) -> Dict:
     """Fetch Wikipedia article content"""
     url = f"https://en.wikipedia.org/wiki/{article_title}"
 
+    # Wikipedia requires User-Agent header
+    headers = {
+        'User-Agent': 'NationalParksChatbot/1.0 (Educational Project; https://github.com/mksamelson/national-parks-chatbot)'
+    }
+
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, 'html.parser')
