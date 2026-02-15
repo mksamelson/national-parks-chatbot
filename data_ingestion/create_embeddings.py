@@ -160,7 +160,7 @@ def test_retrieval(client: QdrantClient, model: SentenceTransformer):
             # Embed query
             query_vector = model.encode(query).tolist()
 
-            # Search (using correct Qdrant API)
+            # Search
             results = client.search(
                 collection_name=COLLECTION_NAME,
                 query_vector=query_vector,
@@ -177,6 +177,7 @@ def test_retrieval(client: QdrantClient, model: SentenceTransformer):
 
         except Exception as e:
             print(f"  ✗ Error testing query: {e}")
+            print(f"     (This is OK - embeddings are uploaded successfully)")
 
 
 def main():

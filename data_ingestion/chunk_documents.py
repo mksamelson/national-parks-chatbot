@@ -162,35 +162,38 @@ def process_wikipedia_data():
         with open(wiki_file, 'r', encoding='utf-8') as f:
             wiki_data = json.load(f)
 
-        park_code = wiki_data.get("park_code", "unknown")
-        park_name = wiki_data.get("title", park_code.upper())
-        text = wiki_data.get("text", "")
+        # If the loaded data is a list, process each item; otherwise, process as a single dict
+        wiki_items = wiki_data if isinstance(wiki_data, list) else [wiki_data]
+        for item in wiki_items:
+            park_code = item.get("park_code", "unknown")
+            park_name = item.get("title", park_code.upper())
+            text = item.get("text", "")
 
-        if not text:
-            continue
+            if not text:
+                continue
 
-        # Chunk the text
-        text_chunks = chunk_text(text)
+            # Chunk the text
+            text_chunks = chunk_text(text)
 
-        # Create chunk objects
-        for idx, chunk in enumerate(text_chunks):
-            chunk_obj = {
-                "id": f"{park_code}_wiki_chunk_{idx}",
-                "park_code": park_code,
-                "park_name": park_name,
-                "chunk_index": idx,
-                "text": chunk,
-                "token_count": count_tokens_approx(chunk),
-                "source_url": wiki_data.get("url", f"https://en.wikipedia.org/wiki/{park_name}"),
-                "source_type": "wikipedia",
-                "metadata": {
+            # Create chunk objects
+            for idx, chunk in enumerate(text_chunks):
+                chunk_obj = {
+                    "id": f"{park_code}_wiki_chunk_{idx}",
                     "park_code": park_code,
                     "park_name": park_name,
                     "chunk_index": idx,
-                    "source": "wikipedia"
+                    "text": chunk,
+                    "token_count": count_tokens_approx(chunk),
+                    "source_url": item.get("url", f"https://en.wikipedia.org/wiki/{park_name}"),
+                    "source_type": "wikipedia",
+                    "metadata": {
+                        "park_code": park_code,
+                        "park_name": park_name,
+                        "chunk_index": idx,
+                        "source": "wikipedia"
+                    }
                 }
-            }
-            all_chunks.append(chunk_obj)
+                all_chunks.append(chunk_obj)
 
     print(f"  ✓ Created {len(all_chunks)} chunks from Wikipedia")
     return all_chunks
