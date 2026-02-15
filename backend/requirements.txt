@@ -1,10 +1,15 @@
+# Core dependencies - install first
+wheel
+setuptools
+
 # Web framework
 fastapi==0.109.2
 uvicorn[standard]==0.27.1
 python-dotenv==1.0.1
 pydantic==2.6.1
 
-# AI/ML - sentence-transformers will auto-install compatible torch
+# AI/ML dependencies - install in order
+numpy<2.0.0
 sentence-transformers==2.3.1
 
 # Vector DB and LLM
