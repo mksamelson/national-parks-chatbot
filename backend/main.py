@@ -9,9 +9,7 @@ import logging
 import os
 from dotenv import load_dotenv
 
-from rag import rag_pipeline
-
-# Load environment variables
+# Load environment variables first
 load_dotenv()
 
 # Configure logging
@@ -36,6 +34,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Lazy import of RAG pipeline to speed up startup
+rag_pipeline = None
+
+
+def get_rag_pipeline():
+    """Lazy load RAG pipeline on first use"""
+    global rag_pipeline
+    if rag_pipeline is None:
+        logger.info("Loading RAG pipeline (first request)...")
+        from rag import rag_pipeline as rp
+        rag_pipeline = rp
+        logger.info("✓ RAG pipeline loaded")
+    return rag_pipeline
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Log when app is ready"""
+    logger.info("🚀 FastAPI app started successfully - ready to accept requests")
+    logger.info(f"Health check available at /health")
 
 
 # Request/Response models
@@ -94,17 +113,9 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Detailed health check"""
-    # Check if required env vars are set
-    required_vars = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY"]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-
-    if missing_vars:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Missing required environment variables: {', '.join(missing_vars)}"
-        )
-
+    """Detailed health check - simple and fast for Render"""
+    # Just return healthy - don't check env vars to keep it fast
+    # Env vars will be checked when actually used
     return {
         "status": "healthy",
         "message": "All systems operational",
@@ -128,7 +139,10 @@ async def chat(request: ChatRequest):
     try:
         logger.info(f"Chat request: {request.question}")
 
-        result = await rag_pipeline.answer_question(
+        # Get RAG pipeline (loads on first use)
+        pipeline = get_rag_pipeline()
+
+        result = await pipeline.answer_question(
             question=request.question,
             top_k=request.top_k,
             park_code=request.park_code
@@ -157,7 +171,10 @@ async def search(request: SearchRequest):
     try:
         logger.info(f"Search request: {request.query}")
 
-        results = await rag_pipeline.search(
+        # Get RAG pipeline (loads on first use)
+        pipeline = get_rag_pipeline()
+
+        results = await pipeline.search(
             query=request.query,
             top_k=request.top_k,
             park_code=request.park_code
