@@ -1,5 +1,6 @@
 """
 Generate embeddings for document chunks and upload to Qdrant
+Now using Cohere API (no local models = low memory!)
 """
 import os
 import json
@@ -7,8 +8,8 @@ from pathlib import Path
 from typing import List, Dict
 from tqdm import tqdm
 from dotenv import load_dotenv
+import cohere
 
-from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
@@ -17,9 +18,10 @@ load_dotenv()
 # Configuration
 QDRANT_URL = os.getenv('QDRANT_URL')
 QDRANT_API_KEY = os.getenv('QDRANT_API_KEY')
+COHERE_API_KEY = os.getenv('COHERE_API_KEY')
 COLLECTION_NAME = "national_parks"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384  # Dimension for all-MiniLM-L6-v2
+COHERE_MODEL = "embed-english-light-v3.0"
+EMBEDDING_DIM = 1024  # Cohere embedding dimension
 
 INPUT_DIR = Path("../data/processed")
 CHUNKS_FILE = INPUT_DIR / "all_chunks.json"
@@ -69,7 +71,7 @@ def initialize_qdrant() -> QdrantClient:
             return client
 
     # Create collection
-    print(f"Creating collection '{COLLECTION_NAME}'...")
+    print(f"Creating collection '{COLLECTION_NAME}' with dimension {EMBEDDING_DIM}...")
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(
@@ -82,30 +84,44 @@ def initialize_qdrant() -> QdrantClient:
     return client
 
 
-def load_embedding_model() -> SentenceTransformer:
-    """Load sentence transformer model"""
-    print(f"Loading embedding model: {EMBEDDING_MODEL}")
-    model = SentenceTransformer(EMBEDDING_MODEL)
-    print(f"✓ Model loaded (embedding dimension: {EMBEDDING_DIM})")
-    return model
+def initialize_cohere() -> cohere.Client:
+    """Initialize Cohere client"""
+    if not COHERE_API_KEY:
+        print("Error: COHERE_API_KEY must be set in environment variables")
+        print("\nPlease set it in a .env file:")
+        print("COHERE_API_KEY=your_api_key")
+        print("\nGet a free API key at: https://dashboard.cohere.com")
+        exit(1)
+
+    print(f"Connecting to Cohere API...")
+    client = cohere.Client(COHERE_API_KEY)
+    print(f"✓ Connected to Cohere (model: {COHERE_MODEL})")
+    return client
 
 
-def generate_embeddings(chunks: List[Dict], model: SentenceTransformer) -> List[List[float]]:
-    """Generate embeddings for all chunks"""
-    print(f"Generating embeddings for {len(chunks)} chunks...")
+def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> List[List[float]]:
+    """Generate embeddings for all chunks using Cohere API"""
+    print(f"Generating embeddings for {len(chunks)} chunks using Cohere...")
 
     texts = [chunk["text"] for chunk in chunks]
+    all_embeddings = []
 
-    # Generate embeddings in batches
-    embeddings = model.encode(
-        texts,
-        show_progress_bar=True,
-        batch_size=32,
-        convert_to_numpy=True
-    )
+    # Process in batches (Cohere limit is 96 texts per request)
+    batch_size = 96
+    for i in tqdm(range(0, len(texts), batch_size)):
+        batch_texts = texts[i:i + batch_size]
 
-    print(f"✓ Generated {len(embeddings)} embeddings")
-    return embeddings.tolist()
+        # Get embeddings from Cohere
+        response = cohere_client.embed(
+            texts=batch_texts,
+            model=COHERE_MODEL,
+            input_type="search_document"
+        )
+
+        all_embeddings.extend(response.embeddings)
+
+    print(f"✓ Generated {len(all_embeddings)} embeddings")
+    return all_embeddings
 
 
 def upload_to_qdrant(client: QdrantClient, chunks: List[Dict], embeddings: List[List[float]]):
@@ -140,7 +156,7 @@ def upload_to_qdrant(client: QdrantClient, chunks: List[Dict], embeddings: List[
     print(f"✓ Uploaded {len(points)} points to Qdrant")
 
 
-def test_retrieval(client: QdrantClient, model: SentenceTransformer):
+def test_retrieval(qdrant_client: QdrantClient, cohere_client: cohere.Client):
     """Test retrieval with sample queries"""
     print("\n" + "=" * 50)
     print("Testing retrieval with sample queries...")
@@ -157,11 +173,16 @@ def test_retrieval(client: QdrantClient, model: SentenceTransformer):
         print(f"\nQuery: {query}")
 
         try:
-            # Embed query
-            query_vector = model.encode(query).tolist()
+            # Embed query with Cohere
+            query_response = cohere_client.embed(
+                texts=[query],
+                model=COHERE_MODEL,
+                input_type="search_query"
+            )
+            query_vector = query_response.embeddings[0]
 
             # Search
-            results = client.search(
+            results = qdrant_client.search(
                 collection_name=COLLECTION_NAME,
                 query_vector=query_vector,
                 limit=3
@@ -177,12 +198,11 @@ def test_retrieval(client: QdrantClient, model: SentenceTransformer):
 
         except Exception as e:
             print(f"  ✗ Error testing query: {e}")
-            print(f"     (This is OK - embeddings are uploaded successfully)")
 
 
 def main():
     """Main execution"""
-    print("National Parks Embeddings Creator")
+    print("National Parks Embeddings Creator (Cohere API)")
     print("=" * 50)
 
     # Load chunks
@@ -191,24 +211,25 @@ def main():
         return
 
     # Initialize Qdrant
-    client = initialize_qdrant()
+    qdrant_client = initialize_qdrant()
 
-    # Load embedding model
-    model = load_embedding_model()
+    # Initialize Cohere
+    cohere_client = initialize_cohere()
 
     # Generate embeddings
-    embeddings = generate_embeddings(chunks, model)
+    embeddings = generate_embeddings(chunks, cohere_client)
 
     # Upload to Qdrant
-    upload_to_qdrant(client, chunks, embeddings)
+    upload_to_qdrant(qdrant_client, chunks, embeddings)
 
     # Test retrieval
-    test_retrieval(client, model)
+    test_retrieval(qdrant_client, cohere_client)
 
     print("\n" + "=" * 50)
     print("✓ All done! Your vector database is ready.")
     print(f"✓ Collection: {COLLECTION_NAME}")
     print(f"✓ Total vectors: {len(chunks)}")
+    print(f"✓ Embedding dimension: {EMBEDDING_DIM}")
     print("=" * 50)
 
 
