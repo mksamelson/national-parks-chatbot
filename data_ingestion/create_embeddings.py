@@ -163,6 +163,15 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
 
             all_embeddings.extend(response.embeddings)
 
+            # Debug: Check dimension of first embedding in first batch
+            if i == 0 and len(response.embeddings) > 0:
+                first_dim = len(response.embeddings[0])
+                print(f"\n✓ Cohere API working! Embedding dimension: {first_dim}")
+                if first_dim != 1024:
+                    print(f"❌ ERROR: Expected 1024-dim, got {first_dim}-dim!")
+                    print("Check your Cohere model and API key.")
+                    exit(1)
+
             # Rate limiting: wait between batches (except last one)
             if i + batch_size < len(texts):
                 time.sleep(delay_seconds)
@@ -180,6 +189,16 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
             all_embeddings.extend(response.embeddings)
 
     print(f"✓ Generated {len(all_embeddings)} embeddings")
+
+    # Final verification
+    if len(all_embeddings) > 0:
+        actual_dim = len(all_embeddings[0])
+        print(f"✓ Final check: Embedding dimension = {actual_dim}")
+        if actual_dim != 1024:
+            print(f"❌ CRITICAL ERROR: Embeddings are {actual_dim}-dim, not 1024-dim!")
+            print("Something went wrong with Cohere API.")
+            exit(1)
+
     return all_embeddings
 
 
