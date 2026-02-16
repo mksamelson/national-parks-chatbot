@@ -100,25 +100,53 @@ def initialize_cohere() -> cohere.Client:
 
 
 def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> List[List[float]]:
-    """Generate embeddings for all chunks using Cohere API"""
+    """Generate embeddings for all chunks using Cohere API with rate limiting"""
+    import time
+
     print(f"Generating embeddings for {len(chunks)} chunks using Cohere...")
+    print("(Free tier rate limit: 100k tokens/min - adding delays to stay under limit)")
 
     texts = [chunk["text"] for chunk in chunks]
     all_embeddings = []
 
-    # Process in batches (Cohere limit is 96 texts per request)
-    batch_size = 96
+    # Smaller batch size to stay under rate limit
+    # Estimate ~500 tokens per chunk = ~25k tokens per batch
+    # Process 3-4 batches per minute to stay safe
+    batch_size = 50
+    delay_seconds = 15  # Wait 15 seconds between batches
+
+    total_batches = (len(texts) + batch_size - 1) // batch_size
+    print(f"Processing in {total_batches} batches (15 sec delay between batches)")
+    print(f"Estimated time: {(total_batches * delay_seconds) // 60} minutes")
+
     for i in tqdm(range(0, len(texts), batch_size)):
         batch_texts = texts[i:i + batch_size]
 
-        # Get embeddings from Cohere
-        response = cohere_client.embed(
-            texts=batch_texts,
-            model=COHERE_MODEL,
-            input_type="search_document"
-        )
+        try:
+            # Get embeddings from Cohere
+            response = cohere_client.embed(
+                texts=batch_texts,
+                model=COHERE_MODEL,
+                input_type="search_document"
+            )
 
-        all_embeddings.extend(response.embeddings)
+            all_embeddings.extend(response.embeddings)
+
+            # Rate limiting: wait between batches (except last one)
+            if i + batch_size < len(texts):
+                time.sleep(delay_seconds)
+
+        except Exception as e:
+            print(f"\n⚠ Error on batch {i//batch_size + 1}: {e}")
+            print("Waiting 60 seconds before retry...")
+            time.sleep(60)
+            # Retry this batch
+            response = cohere_client.embed(
+                texts=batch_texts,
+                model=COHERE_MODEL,
+                input_type="search_document"
+            )
+            all_embeddings.extend(response.embeddings)
 
     print(f"✓ Generated {len(all_embeddings)} embeddings")
     return all_embeddings
