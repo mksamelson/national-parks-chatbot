@@ -28,6 +28,9 @@ class LLMClient:
             if not api_key:
                 raise ValueError("GROQ_API_KEY must be set")
 
+            # Strip whitespace/newlines from API key
+            api_key = api_key.strip()
+
             logger.info("Connecting to Groq API")
             self.client = Groq(api_key=api_key)
             logger.info(f"✓ Connected to Groq (model: {self.model})")

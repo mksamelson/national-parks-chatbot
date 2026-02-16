@@ -29,6 +29,10 @@ class VectorDB:
             if not qdrant_url or not qdrant_api_key:
                 raise ValueError("QDRANT_URL and QDRANT_API_KEY must be set")
 
+            # Strip whitespace/newlines from credentials
+            qdrant_url = qdrant_url.strip()
+            qdrant_api_key = qdrant_api_key.strip()
+
             logger.info(f"Connecting to Qdrant at {qdrant_url}")
             self.client = QdrantClient(
                 url=qdrant_url,

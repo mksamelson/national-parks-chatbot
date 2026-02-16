@@ -25,6 +25,8 @@ class EmbeddingModel:
             api_key = os.getenv("COHERE_API_KEY")
             if not api_key:
                 raise ValueError("COHERE_API_KEY environment variable not set")
+            # Strip whitespace/newlines from API key
+            api_key = api_key.strip()
             self.client = cohere.Client(api_key)
             logger.info(f"✓ Cohere client initialized (model: {COHERE_MODEL})")
         return self.client
