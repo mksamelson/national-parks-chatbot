@@ -1,5 +1,31 @@
 """
 National Parks Chatbot - FastAPI Backend
+
+This is the main API server for the National Parks chatbot, built using FastAPI.
+
+Architecture:
+- Uses RAG (Retrieval Augmented Generation) to answer questions
+- Cohere API for embeddings (memory-efficient, no local models)
+- Qdrant Cloud for vector search
+- Groq API for LLM generation (Llama 3.3 70B)
+
+Key Design Decisions:
+- Lazy loading: RAG pipeline loads on first request to enable fast startup (<2 sec)
+- This is critical for Render free tier to pass port binding health checks
+- API keys are stripped of whitespace to handle copy/paste errors
+- Simple health check endpoint for monitoring
+
+Memory Usage: ~150MB (fits comfortably in Render's 512MB free tier)
+
+Endpoints:
+- GET  /          - Root health check
+- GET  /health    - Detailed health check
+- POST /api/chat  - Main chat endpoint (RAG-powered Q&A)
+- POST /api/search - Direct vector search (no LLM)
+- GET  /api/parks - List available parks (placeholder)
+
+Author: Built with Claude Code
+Date: February 2026
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
