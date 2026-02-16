@@ -68,7 +68,6 @@ class EmbeddingModel:
 
             # Use Cohere v5 ClientV2 API (not deprecated Client)
             self.client = cohere.ClientV2(api_key=api_key)
-            logger.info(f"✓ Cohere client initialized (model: {COHERE_MODEL})")
 
         return self.client
 

@@ -69,18 +69,15 @@ def get_rag_pipeline():
     """Lazy load RAG pipeline on first use"""
     global rag_pipeline
     if rag_pipeline is None:
-        logger.info("Loading RAG pipeline (first request)...")
         from rag import rag_pipeline as rp
         rag_pipeline = rp
-        logger.info("✓ RAG pipeline loaded")
     return rag_pipeline
 
 
 @app.on_event("startup")
 async def startup_event():
     """Log when app is ready"""
-    logger.info("🚀 FastAPI app started successfully - ready to accept requests")
-    logger.info(f"Health check available at /health")
+    logger.info("🚀 National Parks Chatbot API started")
 
 
 # Request/Response models
@@ -163,8 +160,6 @@ async def chat(request: ChatRequest):
     ```
     """
     try:
-        logger.info(f"Chat request: {request.question}")
-
         # Get RAG pipeline (loads on first use)
         pipeline = get_rag_pipeline()
 
@@ -195,8 +190,6 @@ async def search(request: SearchRequest):
     ```
     """
     try:
-        logger.info(f"Search request: {request.query}")
-
         # Get RAG pipeline (loads on first use)
         pipeline = get_rag_pipeline()
 

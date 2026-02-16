@@ -82,12 +82,10 @@ class VectorDB:
             qdrant_url = qdrant_url.strip()
             qdrant_api_key = qdrant_api_key.strip()
 
-            logger.info(f"Connecting to Qdrant at {qdrant_url}")
             self.client = QdrantClient(
                 url=qdrant_url,
                 api_key=qdrant_api_key,
             )
-            logger.info("✓ Connected to Qdrant")
 
     def search(
         self,

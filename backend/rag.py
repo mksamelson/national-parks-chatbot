@@ -112,12 +112,10 @@ class RAGPipeline:
         try:
             # Step 1: Generate question embedding using Cohere API
             # Converts natural language question → 1024-dim vector
-            logger.info(f"Generating embedding for question: {question[:50]}...")
             query_vector = self.embedding_model.encode(question)
 
             # Step 2: Retrieve relevant context using Qdrant vector search
             # Finds top_k most similar document chunks via cosine similarity
-            logger.info(f"Retrieving top {top_k} relevant chunks...")
             context_chunks = self.vector_db.search(
                 query_vector=query_vector,
                 top_k=top_k,
@@ -135,7 +133,6 @@ class RAGPipeline:
 
             # Step 3: Generate answer with LLM using retrieved context
             # Groq API generates answer grounded in NPS documentation
-            logger.info("Generating answer with LLM...")
             result = self.llm.generate_with_context(
                 question=question,
                 context_chunks=context_chunks,
@@ -146,7 +143,6 @@ class RAGPipeline:
             result["question"] = question
             result["num_sources"] = len(context_chunks)
 
-            logger.info("✓ Answer generated successfully")
             return result
 
         except Exception as e:
