@@ -59,10 +59,11 @@ class RAGPipeline:
     """
     RAG Pipeline orchestrator for question answering
 
-    Coordinates the three-step RAG process:
-    1. Embedding: Convert question to vector (Cohere)
-    2. Retrieval: Find similar documents (Qdrant)
-    3. Generation: Produce answer with context (Groq)
+    Coordinates the RAG process with conversational query rewriting:
+    1. Query Rewriting: Rewrite question with conversation context (if history exists)
+    2. Embedding: Convert question to vector (Cohere)
+    3. Retrieval: Find similar documents (Qdrant)
+    4. Generation: Produce answer with context (Groq)
     """
 
     def __init__(self):
@@ -70,6 +71,64 @@ class RAGPipeline:
         self.embedding_model = embedding_model
         self.vector_db = vector_db
         self.llm = llm_client
+
+    def _rewrite_query_with_context(
+        self,
+        question: str,
+        conversation_history: List[Dict]
+    ) -> str:
+        """
+        Rewrite a question to include context from conversation history
+
+        This is crucial for conversational RAG: pronouns and references like
+        "there", "it", "them" need to be resolved BEFORE vector search,
+        otherwise the search won't retrieve relevant documents.
+
+        Example:
+            Q1: "What are the best trails at Zion?"
+            Q2: "What wildlife will I see there?"
+            Rewritten Q2: "What wildlife can I see at Zion National Park?"
+
+        Args:
+            question: Current user question (may contain pronouns/references)
+            conversation_history: Previous conversation messages
+
+        Returns:
+            Rewritten question with context resolved, suitable for vector search
+        """
+        # Build conversation context for the rewriting prompt
+        conversation_text = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+            for msg in conversation_history[-4:]  # Use last 4 messages (2 exchanges)
+        ])
+
+        rewrite_prompt = f"""Given the conversation history below, rewrite the user's latest question to be self-contained and specific. Replace pronouns and references (like "it", "there", "that", "them") with the actual entities they refer to.
+
+Conversation history:
+{conversation_text}
+
+Latest question: {question}
+
+Rewrite this question to be clear and specific, suitable for searching a database. Include the park name or specific topic being discussed. Keep it concise (under 20 words).
+
+Rewritten question:"""
+
+        try:
+            rewritten = self.llm.generate(
+                prompt=rewrite_prompt,
+                system_prompt="You are a helpful assistant that rewrites questions to be clear and specific for database search. Output only the rewritten question, nothing else.",
+                temperature=0.3,  # Lower temperature for more focused rewriting
+                max_tokens=100
+            )
+            # Clean up the response (remove quotes, extra whitespace)
+            rewritten = rewritten.strip().strip('"').strip("'").strip()
+
+            logger.info(f"Query rewriting: '{question}' -> '{rewritten}'")
+            return rewritten
+
+        except Exception as e:
+            logger.error(f"Query rewriting failed: {e}, using original question")
+            return question  # Fallback to original question if rewriting fails
 
     async def answer_question(
         self,
@@ -82,9 +141,10 @@ class RAGPipeline:
         Answer a question using the complete RAG pipeline
 
         This is the main entry point for question answering. It performs:
-        1. Question embedding (Cohere API)
-        2. Vector similarity search (Qdrant)
-        3. Context-aware answer generation (Groq API)
+        1. Query rewriting with conversation context (if history provided)
+        2. Question embedding (Cohere API)
+        3. Vector similarity search (Qdrant)
+        4. Context-aware answer generation (Groq API)
 
         Args:
             question: User question about national parks
@@ -115,9 +175,17 @@ class RAGPipeline:
             'According to Source 1, popular trails include...'
         """
         try:
+            # Step 0: Rewrite query with conversation context (if history exists)
+            # This resolves pronouns like "there", "it" before vector search
+            # Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
+            search_query = question
+            if conversation_history and len(conversation_history) > 0:
+                search_query = self._rewrite_query_with_context(question, conversation_history)
+
             # Step 1: Generate question embedding using Cohere API
             # Converts natural language question → 1024-dim vector
-            query_vector = self.embedding_model.encode(question)
+            # Uses the rewritten query for better context-aware search
+            query_vector = self.embedding_model.encode(search_query)
 
             # Step 2: Retrieve relevant context using Qdrant vector search
             # Finds top_k most similar document chunks via cosine similarity

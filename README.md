@@ -25,14 +25,17 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
              1024-dim
 ```
 
-### RAG Pipeline Flow:
+### RAG Pipeline Flow (with Conversational Understanding):
 1. **User Query** → FastAPI endpoint
-2. **Embedding** → Cohere API converts question to 1024-dim vector
-3. **Retrieval** → Qdrant finds top-k similar documents (cosine similarity)
-4. **Generation** → Groq LLM generates answer with retrieved context
-5. **Response** → Answer + sources returned to frontend
+2. **Query Rewriting** → If conversation history exists, LLM rewrites query to resolve pronouns/references
+   - Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
+3. **Embedding** → Cohere API converts (rewritten) question to 1024-dim vector
+4. **Retrieval** → Qdrant finds top-k similar documents (cosine similarity)
+5. **Generation** → Groq LLM generates answer with retrieved context + conversation history
+6. **Response** → Answer + sources returned to frontend
 
 ### Key Design Decisions:
+- **Conversational query rewriting** → Resolves pronouns before vector search for accurate context retrieval
 - **API-based embeddings** (Cohere) instead of local models → saves 300MB RAM
 - **Lazy loading** of RAG pipeline → <2 second startup for Render port binding
 - **Free tier services** → entire stack runs on $0/month
@@ -231,6 +234,19 @@ NPS_API_KEY=your_nps_api_key
 - Maximum 20 messages (10 exchanges) to stay within token limits
 - Optional - leave empty or omit for single-turn questions
 - Backend is stateless - client manages conversation state
+
+**How Query Rewriting Works:**
+When conversation history is provided, the system automatically rewrites ambiguous questions before searching the database. This ensures accurate retrieval of relevant information.
+
+Example:
+1. User: "What are the best trails at Zion?"
+2. User: "What wildlife will I see there?"
+   - **Rewritten internally:** "What wildlife can I see at Zion National Park?"
+   - This allows vector search to find Zion-specific wildlife information
+3. User: "Are they dangerous?"
+   - **Rewritten internally:** "Are the animals at Zion National Park dangerous?"
+
+This query rewriting happens transparently - you just include the conversation history, and the system handles the rest.
 
 **Example: Multi-turn conversation flow**
 ```python
