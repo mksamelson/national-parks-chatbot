@@ -12,5 +12,5 @@ pydantic>=2.6.0
 cohere>=5.9.0,<6.0.0
 
 # Vector DB and LLM
-qdrant-client>=1.7.0,<2.0.0
+qdrant-client==1.7.3
 groq>=0.4.0
