@@ -141,7 +141,8 @@ class LLMClient:
         self,
         question: str,
         context_chunks: List[Dict],
-        system_prompt: str = None
+        system_prompt: str = None,
+        conversation_history: List[Dict] = None
     ) -> Dict:
         """
         Generate answer with retrieved context (RAG - Retrieval Augmented Generation)
@@ -153,9 +154,10 @@ class LLMClient:
         RAG Flow:
         1. Format context chunks into numbered sources with park names
         2. Build prompt with context + user question
-        3. Instruct model to cite sources (e.g., "According to Source 1...")
-        4. Generate answer using Groq API
-        5. Extract and return source metadata
+        3. Include conversation history for multi-turn conversations
+        4. Instruct model to cite sources (e.g., "According to Source 1...")
+        5. Generate answer using Groq API
+        6. Extract and return source metadata
 
         Args:
             question: User question about national parks
@@ -167,6 +169,8 @@ class LLMClient:
                            - source_url: Original NPS document URL
                            - score: Similarity score (0-1)
             system_prompt: Optional system prompt to guide model behavior
+            conversation_history: Optional list of previous messages for multi-turn conversations
+                                Each message is a dict with 'role' and 'content' keys
 
         Returns:
             Dict containing:
@@ -205,11 +209,46 @@ User Question: {question}
 
 Please answer the question based on the context provided. If the context doesn't contain enough information to answer the question, say so."""
 
-        # Generate answer using LLM with formatted context
-        answer = self.generate(
-            prompt=user_prompt,
-            system_prompt=system_prompt
-        )
+        # Build messages array for Groq API with conversation history
+        self.connect()
+
+        messages = []
+
+        # 1. System prompt
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+
+        # 2. Conversation history (if provided)
+        if conversation_history:
+            for msg in conversation_history:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+
+        # 3. Current user prompt with context
+        messages.append({
+            "role": "user",
+            "content": user_prompt
+        })
+
+        # Call Groq API with full conversation context
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+
+            answer = response.choices[0].message.content
+
+        except Exception as e:
+            logger.error(f"Groq API error: {e}")
+            raise
 
         # Extract source metadata for frontend display
         # Provides attribution links and similarity scores

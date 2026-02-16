@@ -50,7 +50,9 @@ Guidelines:
 - Include specific details when available (trail names, distances, seasonal info, etc.)
 - If you don't have enough information to answer, say so and suggest where users can find more info
 - Be friendly and encouraging about visiting national parks
-- Always prioritize visitor safety when relevant"""
+- Always prioritize visitor safety when relevant
+- When answering follow-up questions, reference previous parts of the conversation naturally
+- If a user's question refers to "it" or "there", use conversation context to understand what they mean"""
 
 
 class RAGPipeline:
@@ -73,7 +75,8 @@ class RAGPipeline:
         self,
         question: str,
         top_k: int = 5,
-        park_code: str = None
+        park_code: str = None,
+        conversation_history: List[Dict] = None
     ) -> Dict:
         """
         Answer a question using the complete RAG pipeline
@@ -91,6 +94,9 @@ class RAGPipeline:
             park_code: Optional 4-letter park code to filter results
                       (e.g., 'yell' for Yellowstone, 'yose' for Yosemite)
                       If None, searches across all parks
+            conversation_history: Optional list of previous messages for multi-turn conversations
+                                Each message is a dict with 'role' and 'content' keys
+                                (e.g., [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}])
 
         Returns:
             Dict containing:
@@ -132,10 +138,12 @@ class RAGPipeline:
 
             # Step 3: Generate answer with LLM using retrieved context
             # Groq API generates answer grounded in NPS documentation
+            # Includes conversation history for multi-turn conversations
             result = self.llm.generate_with_context(
                 question=question,
                 context_chunks=context_chunks,
-                system_prompt=SYSTEM_PROMPT
+                system_prompt=SYSTEM_PROMPT,
+                conversation_history=conversation_history
             )
 
             # Add metadata for frontend display

@@ -6,6 +6,7 @@ An intelligent chatbot that helps users explore and learn about U.S. National Pa
 
 - 🏞️ Information on 20+ major U.S. National Parks
 - 💬 Natural language Q&A interface
+- 🧠 **Multi-turn conversation memory** - Ask follow-up questions naturally
 - 📚 Sourced from official NPS data and documents
 - 🔗 Citations to authoritative sources
 - ⚡ Fast responses powered by Groq API
@@ -195,20 +196,82 @@ NPS_API_KEY=your_nps_api_key
 
 ## API Endpoints
 
-- `GET /` - Health check
-- `POST /api/chat` - Main chat endpoint
-  ```json
-  {
-    "question": "What wildlife can I see in Yellowstone?"
-  }
-  ```
-- `POST /api/search` - Direct vector search
-  ```json
-  {
-    "query": "hiking trails",
-    "top_k": 5
-  }
-  ```
+### Chat Endpoint (with Conversation Memory)
+
+`POST /api/chat` - Main chat endpoint with optional conversation history
+
+**Basic request (single question):**
+```json
+{
+  "question": "What wildlife can I see in Yellowstone?",
+  "top_k": 5
+}
+```
+
+**Multi-turn conversation (with history):**
+```json
+{
+  "question": "What about grizzly bears?",
+  "top_k": 5,
+  "conversation_history": [
+    {"role": "user", "content": "What wildlife can I see in Yellowstone?"},
+    {"role": "assistant", "content": "Yellowstone is home to diverse wildlife including grizzly bears, wolves, bison, elk..."}
+  ]
+}
+```
+
+**Parameters:**
+- `question` (required): User question about national parks
+- `top_k` (optional): Number of context chunks to retrieve (1-10, default: 5)
+- `park_code` (optional): Filter results to specific park (e.g., "yell" for Yellowstone)
+- `conversation_history` (optional): Array of previous messages (max 20 messages)
+
+**Conversation History Format:**
+- Each message: `{"role": "user" | "assistant", "content": "string"}`
+- Maximum 20 messages (10 exchanges) to stay within token limits
+- Optional - leave empty or omit for single-turn questions
+- Backend is stateless - client manages conversation state
+
+**Example: Multi-turn conversation flow**
+```python
+# First question (no history)
+response1 = post("/api/chat", {"question": "Tell me about Yellowstone"})
+
+# Follow-up (with history)
+response2 = post("/api/chat", {
+  "question": "What hiking trails are there?",  # "there" = Yellowstone (from context)
+  "conversation_history": [
+    {"role": "user", "content": "Tell me about Yellowstone"},
+    {"role": "assistant", "content": response1['answer']}
+  ]
+})
+
+# Another follow-up (understands pronouns)
+response3 = post("/api/chat", {
+  "question": "Which one is best for beginners?",  # "one" = hiking trail (from context)
+  "conversation_history": [
+    {"role": "user", "content": "Tell me about Yellowstone"},
+    {"role": "assistant", "content": response1['answer']},
+    {"role": "user", "content": "What hiking trails are there?"},
+    {"role": "assistant", "content": response2['answer']}
+  ]
+})
+```
+
+### Search Endpoint
+
+`POST /api/search` - Direct vector search (no LLM generation)
+```json
+{
+  "query": "hiking trails",
+  "top_k": 10,
+  "park_code": "yose"
+}
+```
+
+### Health Check
+
+`GET /` or `GET /health` - Server health status
 
 ## Troubleshooting
 
@@ -285,10 +348,6 @@ All services are on free tiers:
 - [NPS Data API](https://www.nps.gov/subjects/developer/api-documentation.htm)
 - [NPS Publications](https://www.nps.gov/subjects/publications/)
 - Wikipedia (supplementary)
-
-## Contributing
-
-Contributions welcome! Please open an issue or submit a PR.
 
 ## License
 

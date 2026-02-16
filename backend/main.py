@@ -24,7 +24,6 @@ Endpoints:
 - POST /api/search - Direct vector search (no LLM)
 - GET  /api/parks - List available parks (placeholder)
 
-Author: Built with Claude Code
 Date: February 2026
 """
 from fastapi import FastAPI, HTTPException
@@ -81,10 +80,20 @@ async def startup_event():
 
 
 # Request/Response models
+class Message(BaseModel):
+    role: str = Field(..., description="Role: 'user' or 'assistant'")
+    content: str = Field(..., description="Message content")
+
+
 class ChatRequest(BaseModel):
     question: str = Field(..., description="User question about national parks")
     park_code: Optional[str] = Field(None, description="Optional park code to filter results")
     top_k: Optional[int] = Field(5, description="Number of context chunks to retrieve", ge=1, le=10)
+    conversation_history: Optional[List[Message]] = Field(
+        default=None,
+        description="Previous conversation messages (optional, for multi-turn conversations)",
+        max_length=20  # Limit to 10 exchanges
+    )
 
 
 class SearchRequest(BaseModel):
@@ -155,7 +164,11 @@ async def chat(request: ChatRequest):
     ```json
     {
         "question": "What wildlife can I see in Yellowstone?",
-        "top_k": 5
+        "top_k": 5,
+        "conversation_history": [
+            {"role": "user", "content": "Tell me about Yellowstone"},
+            {"role": "assistant", "content": "Yellowstone is..."}
+        ]
     }
     ```
     """
@@ -163,10 +176,19 @@ async def chat(request: ChatRequest):
         # Get RAG pipeline (loads on first use)
         pipeline = get_rag_pipeline()
 
+        # Convert Message models to dicts for pipeline
+        conversation_history = None
+        if request.conversation_history:
+            conversation_history = [
+                {"role": msg.role, "content": msg.content}
+                for msg in request.conversation_history
+            ]
+
         result = await pipeline.answer_question(
             question=request.question,
             top_k=request.top_k,
-            park_code=request.park_code
+            park_code=request.park_code,
+            conversation_history=conversation_history
         )
 
         return result
