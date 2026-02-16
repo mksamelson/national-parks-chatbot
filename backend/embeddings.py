@@ -27,7 +27,8 @@ class EmbeddingModel:
                 raise ValueError("COHERE_API_KEY environment variable not set")
             # Strip whitespace/newlines from API key
             api_key = api_key.strip()
-            self.client = cohere.Client(api_key)
+            # Use cohere v5 ClientV2
+            self.client = cohere.ClientV2(api_key=api_key)
             logger.info(f"✓ Cohere client initialized (model: {COHERE_MODEL})")
         return self.client
 
@@ -38,10 +39,11 @@ class EmbeddingModel:
         response = client.embed(
             texts=[text],
             model=COHERE_MODEL,
-            input_type="search_query"
+            input_type="search_query",
+            embedding_types=["float"]
         )
 
-        return response.embeddings[0]
+        return response.embeddings.float_[0]
 
     def encode_batch(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple texts using Cohere API"""
@@ -50,10 +52,11 @@ class EmbeddingModel:
         response = client.embed(
             texts=texts,
             model=COHERE_MODEL,
-            input_type="search_document"
+            input_type="search_document",
+            embedding_types=["float"]
         )
 
-        return response.embeddings
+        return response.embeddings.float_
 
 
 # Global instance (loaded on first use)

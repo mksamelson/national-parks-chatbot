@@ -9,7 +9,7 @@ python-dotenv==1.0.1
 pydantic==2.6.1
 
 # Embeddings API (replaces sentence-transformers - saves 300MB RAM!)
-cohere==4.47
+cohere==5.11.4
 
 # Vector DB and LLM
 qdrant-client==1.7.3
