@@ -20,7 +20,7 @@ QDRANT_URL = os.getenv('QDRANT_URL')
 QDRANT_API_KEY = os.getenv('QDRANT_API_KEY')
 COHERE_API_KEY = os.getenv('COHERE_API_KEY')
 COLLECTION_NAME = "national_parks"
-COHERE_MODEL = "embed-english-light-v3.0"
+COHERE_MODEL = "embed-english-v3.0"  # Full model (1024-dim), not light (384-dim)
 EMBEDDING_DIM = 1024  # Cohere embedding dimension
 
 INPUT_DIR = Path("../data/processed")

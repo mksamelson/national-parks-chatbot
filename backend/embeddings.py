@@ -9,8 +9,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Model configuration
-EMBEDDING_DIM = 1024  # Cohere embed-english-light-v3.0
-COHERE_MODEL = "embed-english-light-v3.0"  # Free tier model
+EMBEDDING_DIM = 1024  # Cohere embed-english-v3.0
+COHERE_MODEL = "embed-english-v3.0"  # Full model (1024-dim)
 
 
 class EmbeddingModel:
