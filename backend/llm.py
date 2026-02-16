@@ -9,7 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Configuration
-DEFAULT_MODEL = "llama-3.1-70b-versatile"  # Groq's Llama 3.1 70B
+DEFAULT_MODEL = "llama-3.3-70b-versatile"  # Groq's Llama 3.3 70B (3.1 deprecated)
 TEMPERATURE = 0.7
 MAX_TOKENS = 1024
 
