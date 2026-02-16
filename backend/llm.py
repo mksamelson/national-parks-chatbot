@@ -1,5 +1,37 @@
 """
-Groq API integration for LLM inference
+LLM Generation - Groq API Integration
+
+This module handles text generation using Groq's API for fast LLM inference.
+
+Why Groq API instead of local models (e.g., Ollama, llama.cpp):
+- Inference Speed: Groq provides blazing fast inference (~300 tokens/sec)
+  - Local LLMs on CPU: ~10-20 tokens/sec (slow for user experience)
+  - Groq API: ~300 tokens/sec (near-instant responses)
+- Memory Efficiency: No local model loading saves RAM
+  - Local Llama 70B quantized: ~40GB+ RAM (impossible on free tier)
+  - Groq API calls: ~50MB overhead
+- This allows the app to run on Render's 512MB free tier
+- Quality: Llama 3.3 70B produces high-quality, contextual answers
+
+Model Details:
+- Model: llama-3.3-70b-versatile (Groq's hosted Llama 3.3 70B)
+- Free Tier: 30 requests/minute, 14,400 tokens/minute
+- Temperature: 0.7 (balanced creativity/accuracy)
+- Max Tokens: 1024 (sufficient for detailed answers)
+
+RAG Integration:
+- generate_with_context(): Formats retrieved context chunks into prompt
+- Includes source citations in prompts (e.g., "According to Source 1...")
+- System prompts guide the model to cite sources and admit knowledge gaps
+
+Trade-offs:
++ Pros: Ultra-fast inference, no local model management, free tier generous
+- Cons: API dependency, rate limits (30 req/min), requires internet
+
+Note: Llama 3.1 70B was deprecated; updated to Llama 3.3 70B in January 2026
+
+Author: Built with Claude Code
+Date: February 2026
 """
 import os
 from typing import List, Dict
@@ -15,14 +47,28 @@ MAX_TOKENS = 1024
 
 
 class LLMClient:
-    """Wrapper for Groq API client"""
+    """
+    Wrapper for Groq API client providing LLM text generation
+
+    Lazy-loads the connection to Groq API on first use.
+    Handles prompt formatting for RAG (Retrieval Augmented Generation).
+    """
 
     def __init__(self):
+        """Initialize with no client (lazy loading)"""
         self.client = None
         self.model = DEFAULT_MODEL
 
     def connect(self):
-        """Initialize Groq client"""
+        """
+        Connect to Groq API (lazy initialization)
+
+        Reads API key from environment variable and establishes connection.
+        Strips whitespace from API key to handle copy/paste errors.
+
+        Raises:
+            ValueError: If GROQ_API_KEY not set in environment
+        """
         if self.client is None:
             api_key = os.getenv("GROQ_API_KEY")
             if not api_key:
@@ -45,14 +91,25 @@ class LLMClient:
         """
         Generate text using Groq API
 
+        Sends a prompt to Groq's Llama 3.3 70B model and returns generated text.
+        Automatically connects to Groq API if not already connected.
+
         Args:
-            prompt: User prompt
-            system_prompt: Optional system prompt
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
+            prompt: User prompt (the main question/instruction)
+            system_prompt: Optional system prompt to set behavior/context
+            temperature: Sampling temperature (0.0 = deterministic, 1.0 = creative)
+                        Default 0.7 balances accuracy and creativity
+            max_tokens: Maximum tokens to generate (default: 1024)
+                       Limits response length to control costs/latency
 
         Returns:
-            Generated text
+            str: Generated text response from the model
+
+        Example:
+            >>> llm = LLMClient()
+            >>> answer = llm.generate("What is Yellowstone?")
+            >>> print(answer)
+            'Yellowstone is America's first national park...'
         """
         self.connect()
 
@@ -89,23 +146,59 @@ class LLMClient:
         system_prompt: str = None
     ) -> Dict:
         """
-        Generate answer with retrieved context (RAG)
+        Generate answer with retrieved context (RAG - Retrieval Augmented Generation)
+
+        This is the core RAG method that combines retrieved context with LLM generation.
+        It formats the context chunks into a prompt, generates an answer using the LLM,
+        and returns both the answer and source metadata.
+
+        RAG Flow:
+        1. Format context chunks into numbered sources with park names
+        2. Build prompt with context + user question
+        3. Instruct model to cite sources (e.g., "According to Source 1...")
+        4. Generate answer using Groq API
+        5. Extract and return source metadata
 
         Args:
-            question: User question
-            context_chunks: Retrieved context chunks
-            system_prompt: Optional system prompt
+            question: User question about national parks
+            context_chunks: List of retrieved context chunks from vector search
+                           Each chunk is a Dict with keys:
+                           - text: Document content
+                           - park_name: Park name (e.g., "Yellowstone National Park")
+                           - park_code: Park code (e.g., "yell")
+                           - source_url: Original NPS document URL
+                           - score: Similarity score (0-1)
+            system_prompt: Optional system prompt to guide model behavior
 
         Returns:
-            Dict with answer and sources
+            Dict containing:
+            - answer (str): Generated answer with source citations
+            - sources (List[Dict]): List of source metadata, each with:
+                - park_name: Park name
+                - park_code: Park code
+                - url: Source URL
+                - score: Similarity score
+
+        Example:
+            >>> llm = LLMClient()
+            >>> chunks = [
+            ...     {"text": "Yellowstone has wolves...", "park_name": "Yellowstone",
+            ...      "park_code": "yell", "source_url": "https://...", "score": 0.92}
+            ... ]
+            >>> result = llm.generate_with_context("What wildlife is in Yellowstone?", chunks)
+            >>> print(result['answer'])
+            'According to Source 1, Yellowstone has wolves...'
         """
-        # Format context
+        # Format context chunks into numbered sources
+        # Each source includes park name for attribution
+        # Example: "[Source 1 - Yellowstone National Park]\n<chunk text>"
         context_text = "\n\n".join([
             f"[Source {i+1} - {chunk['park_name']}]\n{chunk['text']}"
             for i, chunk in enumerate(context_chunks)
         ])
 
-        # Build prompt
+        # Build RAG prompt with context + question
+        # Instructs model to cite sources and admit if context is insufficient
         user_prompt = f"""Context from National Parks Service:
 
 {context_text}
@@ -114,13 +207,14 @@ User Question: {question}
 
 Please answer the question based on the context provided. Include relevant source citations (e.g., "According to Source 1..."). If the context doesn't contain enough information to answer the question, say so."""
 
-        # Generate answer
+        # Generate answer using LLM with formatted context
         answer = self.generate(
             prompt=user_prompt,
             system_prompt=system_prompt
         )
 
-        # Extract sources
+        # Extract source metadata for frontend display
+        # Provides attribution links and similarity scores
         sources = [
             {
                 "park_name": chunk["park_name"],
