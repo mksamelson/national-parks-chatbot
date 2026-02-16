@@ -196,14 +196,14 @@ class LLMClient:
         ])
 
         # Build RAG prompt with context + question
-        # Instructs model to cite sources and admit if context is insufficient
+        # Instructs model to use context and admit if context is insufficient
         user_prompt = f"""Context from National Parks Service:
 
 {context_text}
 
 User Question: {question}
 
-Please answer the question based on the context provided. Include relevant source citations (e.g., "According to Source 1..."). If the context doesn't contain enough information to answer the question, say so."""
+Please answer the question based on the context provided. If the context doesn't contain enough information to answer the question, say so."""
 
         # Generate answer using LLM with formatted context
         answer = self.generate(
