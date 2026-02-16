@@ -4,12 +4,17 @@ Embedding model loader and inference
 from sentence_transformers import SentenceTransformer
 from typing import List
 import logging
+import gc
+import torch
 
 logger = logging.getLogger(__name__)
 
 # Model configuration
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
+
+# Memory optimization settings
+torch.set_num_threads(1)  # Reduce thread count to save memory
 
 
 class EmbeddingModel:
@@ -23,7 +28,19 @@ class EmbeddingModel:
         """Load the embedding model (lazy loading)"""
         if self.model is None:
             logger.info(f"Loading embedding model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
+
+            # Force garbage collection before loading
+            gc.collect()
+
+            # Load with memory optimization
+            self.model = SentenceTransformer(
+                self.model_name,
+                device='cpu'
+            )
+
+            # Set to eval mode to save memory
+            self.model.eval()
+
             logger.info(f"✓ Model loaded (dimension: {EMBEDDING_DIM})")
 
     def encode(self, text: str) -> List[float]:
