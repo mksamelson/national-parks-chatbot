@@ -2,15 +2,15 @@
 wheel
 setuptools
 
-# Web framework
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
-python-dotenv==1.0.1
-pydantic==2.6.1
+# Web framework - updated for cohere v5 compatibility
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-dotenv>=1.0.0
+pydantic>=2.6.0
 
 # Embeddings API (replaces sentence-transformers - saves 300MB RAM!)
-cohere==5.11.4
+cohere>=5.9.0,<6.0.0
 
 # Vector DB and LLM
-qdrant-client==1.7.3
-groq==0.4.2
+qdrant-client>=1.7.0,<2.0.0
+groq>=0.4.0
