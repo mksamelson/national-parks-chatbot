@@ -60,26 +60,57 @@ def initialize_qdrant() -> QdrantClient:
     collections = client.get_collections().collections
     collection_names = [c.name for c in collections]
 
-    if COLLECTION_NAME in collection_names:
-        print(f"Collection '{COLLECTION_NAME}' already exists")
-        recreate = input("Recreate collection? This will delete existing data (y/n): ")
-        if recreate.lower() == 'y':
-            client.delete_collection(COLLECTION_NAME)
-            print(f"Deleted existing collection '{COLLECTION_NAME}'")
-        else:
-            print("Using existing collection")
-            return client
+    should_create = True
 
-    # Create collection
-    print(f"Creating collection '{COLLECTION_NAME}' with dimension {EMBEDDING_DIM}...")
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(
-            size=EMBEDDING_DIM,
-            distance=Distance.COSINE
-        )
-    )
-    print(f"✓ Collection created")
+    if COLLECTION_NAME in collection_names:
+        # Check dimension of existing collection
+        existing_info = client.get_collection(COLLECTION_NAME)
+        existing_dim = existing_info.config.params.vectors.size
+
+        print(f"Collection '{COLLECTION_NAME}' already exists")
+        print(f"  Current dimension: {existing_dim}")
+        print(f"  Required dimension: {EMBEDDING_DIM}")
+
+        if existing_dim != EMBEDDING_DIM:
+            print(f"\n⚠️  DIMENSION MISMATCH! Must recreate collection.")
+            recreate = input("Delete and recreate with correct dimension? (y/n): ")
+        else:
+            recreate = input("Recreate collection? This will delete existing data (y/n): ")
+
+        if recreate.lower() == 'y':
+            print(f"Deleting existing collection '{COLLECTION_NAME}'...")
+            client.delete_collection(COLLECTION_NAME)
+            print(f"✓ Deleted")
+            should_create = True
+        else:
+            print("⚠️  Using existing collection (may cause dimension errors!)")
+            should_create = False
+
+    # Create collection if needed
+    if should_create:
+        print(f"Creating collection '{COLLECTION_NAME}' with dimension {EMBEDDING_DIM}...")
+        try:
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(
+                    size=EMBEDDING_DIM,
+                    distance=Distance.COSINE
+                )
+            )
+            print(f"✓ Collection created successfully")
+
+            # Verify
+            info = client.get_collection(COLLECTION_NAME)
+            actual_dim = info.config.params.vectors.size
+            print(f"✓ Verified dimension: {actual_dim}")
+
+            if actual_dim != EMBEDDING_DIM:
+                print(f"❌ ERROR: Dimension mismatch! Expected {EMBEDDING_DIM}, got {actual_dim}")
+                exit(1)
+
+        except Exception as e:
+            print(f"❌ Error creating collection: {e}")
+            exit(1)
 
     return client
 
