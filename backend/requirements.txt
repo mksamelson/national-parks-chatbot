@@ -1,4 +1,4 @@
-# Core dependencies - install first
+# Core dependencies
 wheel
 setuptools
 
@@ -8,9 +8,8 @@ uvicorn[standard]==0.27.1
 python-dotenv==1.0.1
 pydantic==2.6.1
 
-# AI/ML dependencies - install in order
-numpy<2.0.0
-sentence-transformers==2.3.1
+# Embeddings API (replaces sentence-transformers - saves 300MB RAM!)
+cohere==4.47
 
 # Vector DB and LLM
 qdrant-client==1.7.3
