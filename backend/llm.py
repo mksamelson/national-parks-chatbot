@@ -142,7 +142,8 @@ class LLMClient:
         question: str,
         context_chunks: List[Dict],
         system_prompt: str = None,
-        conversation_history: List[Dict] = None
+        conversation_history: List[Dict] = None,
+        park_code: str = None
     ) -> Dict:
         """
         Generate answer with retrieved context (RAG - Retrieval Augmented Generation)
@@ -171,6 +172,8 @@ class LLMClient:
             system_prompt: Optional system prompt to guide model behavior
             conversation_history: Optional list of previous messages for multi-turn conversations
                                 Each message is a dict with 'role' and 'content' keys
+            park_code: Optional park code indicating which park is being discussed
+                      If provided, explicitly tells LLM the conversation is about this park
 
         Returns:
             Dict containing:
@@ -199,15 +202,24 @@ class LLMClient:
             for i, chunk in enumerate(context_chunks)
         ])
 
+        # Build conversation context statement if we know which park is being discussed
+        park_context_statement = ""
+        if park_code and context_chunks:
+            # Get park name from first context chunk (all should be from same park)
+            park_name = context_chunks[0].get('park_name', 'National Park')
+            park_context_statement = f"""IMPORTANT CONTEXT: The user is currently asking about {park_name}. All context provided below is specifically about {park_name}. When the user uses words like "there", "it", or "the park", they are referring to {park_name}.
+
+"""
+
         # Build RAG prompt with context + question
         # Instructs model to use context and admit if context is insufficient
-        user_prompt = f"""Context from National Parks Service:
+        user_prompt = f"""{park_context_statement}Context from National Parks Service:
 
 {context_text}
 
 User Question: {question}
 
-Please answer the question based on the context provided. If the context doesn't contain enough information to answer the question, say so."""
+Please answer the question based on the context provided above. Remember that all context is about {context_chunks[0].get('park_name', 'the park being discussed') if context_chunks else 'national parks'}."""
 
         # Build messages array for Groq API with conversation history
         self.connect()

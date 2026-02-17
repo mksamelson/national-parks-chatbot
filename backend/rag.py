@@ -286,12 +286,13 @@ Rewritten question:"""
 
             # Step 3: Generate answer with LLM using retrieved context
             # Groq API generates answer grounded in NPS documentation
-            # Includes conversation history for multi-turn conversations
+            # Includes conversation history and detected park context
             result = self.llm.generate_with_context(
                 question=question,
                 context_chunks=context_chunks,
                 system_prompt=SYSTEM_PROMPT,
-                conversation_history=conversation_history
+                conversation_history=conversation_history,
+                park_code=active_park_code  # Tell LLM which park is being discussed
             )
 
             # Add metadata for frontend display
