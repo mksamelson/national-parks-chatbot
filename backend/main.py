@@ -28,7 +28,7 @@ Date: February 2026
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict
 import logging
 import os
@@ -91,9 +91,15 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = Field(5, description="Number of context chunks to retrieve", ge=1, le=10)
     conversation_history: Optional[List[Message]] = Field(
         default=None,
-        description="Previous conversation messages (optional, for multi-turn conversations)",
-        max_length=20  # Limit to 10 exchanges
+        description="Previous conversation messages (optional, for multi-turn conversations)"
     )
+
+    @field_validator('conversation_history')
+    @classmethod
+    def validate_history_length(cls, v):
+        if v is not None and len(v) > 20:
+            raise ValueError('conversation_history cannot exceed 20 messages (10 exchanges)')
+        return v
 
 
 class SearchRequest(BaseModel):
