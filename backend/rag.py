@@ -72,10 +72,44 @@ class RAGPipeline:
         self.vector_db = vector_db
         self.llm = llm_client
 
+    def _get_park_name_from_code(self, park_code: str) -> str:
+        """
+        Convert park code to full park name for display
+
+        Args:
+            park_code: 4-letter park code (e.g., 'glac', 'yell')
+
+        Returns:
+            Full park name (e.g., 'Glacier National Park')
+        """
+        CODE_TO_NAME = {
+            'yell': 'Yellowstone National Park',
+            'yose': 'Yosemite National Park',
+            'zion': 'Zion National Park',
+            'glac': 'Glacier National Park',
+            'grca': 'Grand Canyon National Park',
+            'romo': 'Rocky Mountain National Park',
+            'grsm': 'Great Smoky Mountains National Park',
+            'acad': 'Acadia National Park',
+            'olym': 'Olympic National Park',
+            'grte': 'Grand Teton National Park',
+            'brca': 'Bryce Canyon National Park',
+            'arch': 'Arches National Park',
+            'cany': 'Canyonlands National Park',
+            'seki': 'Sequoia and Kings Canyon National Parks',
+            'deva': 'Death Valley National Park',
+            'jotr': 'Joshua Tree National Park',
+            'shen': 'Shenandoah National Park',
+            'mora': 'Mount Rainier National Park',
+            'crla': 'Crater Lake National Park'
+        }
+        return CODE_TO_NAME.get(park_code, f"Park {park_code}")
+
     def _rewrite_query_with_context(
         self,
         question: str,
-        conversation_history: List[Dict]
+        conversation_history: List[Dict],
+        park_code: str = None
     ) -> str:
         """
         Rewrite a question to include context from conversation history
@@ -92,6 +126,7 @@ class RAGPipeline:
         Args:
             question: Current user question (may contain pronouns/references)
             conversation_history: Previous conversation messages
+            park_code: Optional detected park code to guide rewriting
 
         Returns:
             Rewritten question with context resolved, suitable for vector search
@@ -102,12 +137,18 @@ class RAGPipeline:
             for msg in conversation_history[-4:]  # Use last 4 messages (2 exchanges)
         ])
 
+        # If we detected a park, include it explicitly in the rewriting prompt
+        park_context = ""
+        if park_code:
+            park_name = self._get_park_name_from_code(park_code)
+            park_context = f"\n\nIMPORTANT: The conversation is about {park_name}. Ensure the rewritten question includes this park name if relevant."
+
         rewrite_prompt = f"""Given the conversation history below, rewrite the user's latest question to be self-contained and specific. Replace pronouns and references (like "it", "there", "that", "them") with the actual entities they refer to.
 
 Conversation history:
 {conversation_text}
 
-Latest question: {question}
+Latest question: {question}{park_context}
 
 Rewrite this question to be clear and specific, suitable for searching a database. Include the park name or specific topic being discussed. Keep it concise (under 20 words).
 
@@ -142,10 +183,18 @@ Rewritten question:"""
         filter vector search to ONLY that park to prevent mixing information
         from other parks.
 
+        CRITICAL: This method prioritizes park mentions in the following order:
+        1. Current question (highest priority - allows explicit park switching)
+        2. Most recent USER message mentioning a park (ignores assistant messages)
+
+        This prevents assistant responses that mention multiple parks for comparison
+        from incorrectly changing the park context.
+
         Example:
             User: "Tell me about Glacier National Park"
+            Assistant: "Glacier is similar to Yellowstone..." (mentions both parks)
             User: "What wildlife is there?"
-            -> Extract: "glac" (Glacier's park code)
+            -> Extract: "glac" (from user's last park mention, NOT Yellowstone from assistant)
             -> Filter search to only Glacier documents
 
         Args:
@@ -180,24 +229,30 @@ Rewritten question:"""
             'crater lake': 'crla'
         }
 
-        # Check last 6 messages (3 exchanges) for park mentions
-        recent_messages = conversation_history[-6:] if conversation_history else []
-
-        # Combine recent conversation text
-        conversation_text = " ".join([
-            msg['content'].lower()
-            for msg in recent_messages
-        ])
-
-        # Also check current question
-        conversation_text += " " + question.lower()
-
-        # Find park mentions (most recent takes precedence)
+        # PRIORITY 1: Check current question FIRST (allows explicit park switching)
+        question_lower = question.lower()
         for park_name, park_code in PARK_MAPPINGS.items():
-            if park_name in conversation_text:
-                logger.info(f"Detected park context: {park_name} ({park_code})")
+            if park_name in question_lower:
+                logger.info(f"✓ Park in current question: {park_name} ({park_code})")
                 return park_code
 
+        # PRIORITY 2: Check USER messages in conversation history (newest first)
+        # Only check user messages to avoid assistant responses changing context
+        recent_messages = conversation_history[-6:] if conversation_history else []
+
+        # Filter to user messages only
+        user_messages = [msg for msg in recent_messages if msg.get('role') == 'user']
+
+        # Process in reverse order (most recent first)
+        for msg in reversed(user_messages):
+            msg_text = msg['content'].lower()
+            for park_name, park_code in PARK_MAPPINGS.items():
+                if park_name in msg_text:
+                    logger.info(f"✓ Park from user message: {park_name} ({park_code})")
+                    logger.debug(f"  Found in message: '{msg['content'][:80]}...'")
+                    return park_code
+
+        logger.info("✗ No park detected in question or recent user messages")
         return None
 
     async def answer_question(
@@ -267,9 +322,14 @@ Rewritten question:"""
             # Step 0b: Rewrite query with conversation context (if history exists)
             # This resolves pronouns like "there", "it" before vector search
             # Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
+            # Pass detected park_code to help guide rewriting
             search_query = question
             if conversation_history and len(conversation_history) > 0:
-                search_query = self._rewrite_query_with_context(question, conversation_history)
+                search_query = self._rewrite_query_with_context(
+                    question,
+                    conversation_history,
+                    park_code=active_park_code  # Pass detected park to guide rewriting
+                )
 
             # Step 1: Generate question embedding using Cohere API
             # Converts natural language question → 1024-dim vector
@@ -284,6 +344,15 @@ Rewritten question:"""
                 top_k=top_k,
                 park_code=active_park_code  # Automatically filters to detected park
             )
+
+            # Validate search results match expected park
+            logger.info(f"Search returned {len(context_chunks)} chunks")
+            if active_park_code and context_chunks:
+                parks_in_results = {chunk.get('park_code') for chunk in context_chunks}
+                if len(parks_in_results) > 1 or active_park_code not in parks_in_results:
+                    logger.warning(f"⚠ Park mismatch: Expected {active_park_code}, got {parks_in_results}")
+                else:
+                    logger.info(f"✓ All results from expected park: {active_park_code}")
 
             # Handle case where no relevant documents found
             if not context_chunks:

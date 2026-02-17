@@ -11,10 +11,17 @@ Run this script while the backend server is running:
 Then in another terminal:
   python test_conversation_backend.py
 """
+import sys
+import io
 import requests
 import json
 
-API_URL = "http://localhost:8000/api/chat"
+# Fix Windows console encoding issues
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+API_URL = "http://localhost:8002/api/chat"
 
 print("="*70)
 print("TESTING CONVERSATION MEMORY - Backend API")
@@ -164,13 +171,221 @@ except Exception as e:
     print(f"\n✗ Request failed: {e}")
     exit(1)
 
+# Test 4: Assistant messages don't change park context (CRITICAL)
 print("\n" + "="*70)
-print("BACKEND TESTING COMPLETE")
+print("TEST 4: Assistant mentions of other parks don't change context")
 print("="*70)
-print("\nIf tests passed, the backend is working correctly.")
-print("If you're still having issues in your app, check that your frontend")
-print("is sending conversation_history with each API request.")
+
+request4 = {
+    "question": "What are the hiking trails?",
+    "conversation_history": [
+        {
+            "role": "user",
+            "content": "Tell me about Glacier National Park"
+        },
+        {
+            "role": "assistant",
+            "content": "Glacier National Park is similar to Yellowstone and Yosemite in many ways. Like Yellowstone, it has diverse wildlife including bears and elk."
+        }
+    ]
+}
+
+print(f"\nRequest:")
+print(f"  Question: '{request4['question']}'")
+print(f"  User mentioned: Glacier")
+print(f"  Assistant mentioned: Yellowstone, Yosemite")
+print(f"  Expected park context: Glacier (from user, not assistant)")
+
+try:
+    response4 = requests.post(API_URL, json=request4, timeout=30)
+    response4.raise_for_status()
+    result4 = response4.json()
+
+    print(f"\n✓ Response received")
+    park_sources = set(s['park_name'] for s in result4['sources'])
+    print(f"Sources from parks: {park_sources}")
+
+    # Should return results from Glacier, NOT Yellowstone/Yosemite
+    has_glacier = any('glacier' in s['park_name'].lower() for s in result4['sources'])
+    has_yellowstone = any('yellowstone' in s['park_name'].lower() for s in result4['sources'])
+    has_yosemite = any('yosemite' in s['park_name'].lower() for s in result4['sources'])
+
+    if has_glacier and not has_yellowstone and not has_yosemite:
+        print("\n✅ TEST PASSED - Context stayed with Glacier (user's mention)")
+    else:
+        print("\n❌ TEST FAILED - Context changed to wrong park")
+        print("Assistant messages should NOT change park context!")
+
+except Exception as e:
+    print(f"\n✗ Request failed: {e}")
+
+# Test 5: Park in current question overrides history
+print("\n" + "="*70)
+print("TEST 5: Park in current question overrides history")
+print("="*70)
+
+request5 = {
+    "question": "What about Zion National Park?",
+    "conversation_history": [
+        {
+            "role": "user",
+            "content": "Tell me about Glacier National Park"
+        },
+        {
+            "role": "assistant",
+            "content": result1['answer']
+        }
+    ]
+}
+
+print(f"\nRequest:")
+print(f"  Question: '{request5['question']}'")
+print(f"  Previous context: Glacier")
+print(f"  Current question mentions: Zion")
+print(f"  Expected park context: Zion (current question overrides)")
+
+try:
+    response5 = requests.post(API_URL, json=request5, timeout=30)
+    response5.raise_for_status()
+    result5 = response5.json()
+
+    print(f"\n✓ Response received")
+    park_sources = set(s['park_name'] for s in result5['sources'])
+    print(f"Sources from parks: {park_sources}")
+
+    has_zion = any('zion' in s['park_name'].lower() for s in result5['sources'])
+    has_glacier = any('glacier' in s['park_name'].lower() for s in result5['sources'])
+
+    if has_zion and not has_glacier:
+        print("\n✅ TEST PASSED - Switched to Zion as requested")
+    else:
+        print("\n❌ TEST FAILED - Should have switched to Zion")
+
+except Exception as e:
+    print(f"\n✗ Request failed: {e}")
+
+# Test 6: Most recent user park mention takes precedence
+print("\n" + "="*70)
+print("TEST 6: Most recent user park mention takes precedence")
+print("="*70)
+
+request6 = {
+    "question": "Tell me more about hiking trails",
+    "conversation_history": [
+        {
+            "role": "user",
+            "content": "What's the weather like at Yellowstone?"
+        },
+        {
+            "role": "assistant",
+            "content": "Yellowstone has varied weather..."
+        },
+        {
+            "role": "user",
+            "content": "How about Yosemite National Park?"
+        },
+        {
+            "role": "assistant",
+            "content": "Yosemite has a Mediterranean climate..."
+        }
+    ]
+}
+
+print(f"\nRequest:")
+print(f"  Question: '{request6['question']}'")
+print(f"  User mentioned: Yellowstone (older), then Yosemite (recent)")
+print(f"  Expected park context: Yosemite (most recent user mention)")
+
+try:
+    response6 = requests.post(API_URL, json=request6, timeout=30)
+    response6.raise_for_status()
+    result6 = response6.json()
+
+    print(f"\n✓ Response received")
+    park_sources = set(s['park_name'] for s in result6['sources'])
+    print(f"Sources from parks: {park_sources}")
+
+    has_yosemite = any('yosemite' in s['park_name'].lower() for s in result6['sources'])
+    has_yellowstone = any('yellowstone' in s['park_name'].lower() for s in result6['sources'])
+
+    if has_yosemite and not has_yellowstone:
+        print("\n✅ TEST PASSED - Used most recent park (Yosemite)")
+    else:
+        print("\n❌ TEST FAILED - Should use most recent park mention")
+
+except Exception as e:
+    print(f"\n✗ Request failed: {e}")
+
+# Test 7: Extended conversation (5+ turns) maintains context
+print("\n" + "="*70)
+print("TEST 7: Extended conversation maintains park context")
+print("="*70)
+
+request7 = {
+    "question": "Are there visitor centers?",
+    "conversation_history": [
+        {
+            "role": "user",
+            "content": "Tell me about Crater Lake"
+        },
+        {
+            "role": "assistant",
+            "content": "Crater Lake is a beautiful volcanic lake..."
+        },
+        {
+            "role": "user",
+            "content": "What wildlife is there?"
+        },
+        {
+            "role": "assistant",
+            "content": "You can see deer, eagles, and other wildlife..."
+        },
+        {
+            "role": "user",
+            "content": "What about hiking?"
+        },
+        {
+            "role": "assistant",
+            "content": "There are many trails around the rim..."
+        }
+    ]
+}
+
+print(f"\nRequest:")
+print(f"  Question: '{request7['question']}'")
+print(f"  Initial park mentioned: Crater Lake (6 messages ago)")
+print(f"  Follow-up turns: 3 (with pronouns only)")
+print(f"  Expected park context: Crater Lake")
+
+try:
+    response7 = requests.post(API_URL, json=request7, timeout=30)
+    response7.raise_for_status()
+    result7 = response7.json()
+
+    print(f"\n✓ Response received")
+    park_sources = set(s['park_name'] for s in result7['sources'])
+    print(f"Sources from parks: {park_sources}")
+
+    has_crater = any('crater' in s['park_name'].lower() for s in result7['sources'])
+
+    if has_crater:
+        print("\n✅ TEST PASSED - Maintained context through extended conversation")
+    else:
+        print("\n❌ TEST FAILED - Lost park context after multiple turns")
+
+except Exception as e:
+    print(f"\n✗ Request failed: {e}")
+
+print("\n" + "="*70)
+print("COMPREHENSIVE TESTING COMPLETE")
+print("="*70)
+print("\nAll tests completed. Review results above.")
+print("\nKey improvements tested:")
+print("  ✓ Assistant messages don't change park context")
+print("  ✓ Current question overrides conversation history")
+print("  ✓ Most recent USER park mention takes precedence")
+print("  ✓ Extended conversations maintain context")
 print("\nTo check backend logs, look for these messages:")
-print("  - 'Conversation history provided: True'")
-print("  - '✓ Park detected from conversation: glac'")
-print("  - 'Active park code for search: glac'")
+print("  - '✓ Park in current question: <park> (<code>)'")
+print("  - '✓ Park from user message: <park> (<code>)'")
+print("  - '✗ No park detected in question or recent user messages'")

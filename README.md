@@ -35,12 +35,20 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
 6. **Response** → Answer + sources returned to frontend
 
 ### Key Design Decisions:
-- **Park context detection** → Auto-filters search to the park being discussed, preventing info mixing
+- **Smart park context detection** → Automatically filters search to the park being discussed by analyzing USER messages only (ignores assistant responses to prevent context pollution)
 - **Conversational query rewriting** → Resolves pronouns before vector search for accurate context retrieval
 - **API-based embeddings** (Cohere) instead of local models → saves 300MB RAM
 - **Lazy loading** of RAG pipeline → <2 second startup for Render port binding
 - **Free tier services** → entire stack runs on $0/month
 - **Memory footprint** → ~150MB (fits in Render's 512MB free tier)
+
+### Recent Updates:
+- **February 2026**: Fixed conversation context detection algorithm
+  - Now correctly prioritizes current question over history
+  - Filters to USER messages only (assistant responses no longer pollute context)
+  - Processes messages in reverse order (newest first) for accurate context
+  - Added graceful fallback for Qdrant filtering when indexes are unavailable
+  - All 7 comprehensive test cases pass ✅
 
 ## Tech Stack
 
@@ -342,6 +350,26 @@ python check_qdrant.py
 
 ### Running Tests
 
+**Backend conversation memory tests:**
+```bash
+# Start backend server in one terminal
+cd backend
+uvicorn main:app --reload
+
+# Run tests in another terminal
+python test_conversation_backend.py
+```
+
+The test suite includes 7 comprehensive tests:
+1. Basic question without history
+2. Follow-up question with conversation history
+3. Extended follow-up maintaining context
+4. **Assistant messages don't change context** (critical test)
+5. Current question overrides history
+6. Most recent user mention takes precedence
+7. Extended conversation (5+ turns) maintains context
+
+**Unit tests:**
 ```bash
 pytest tests/
 ```

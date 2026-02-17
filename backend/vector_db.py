@@ -39,7 +39,7 @@ Date: February 2026
 import os
 from typing import List, Dict
 from qdrant_client import QdrantClient
-from qdrant_client.models import ScoredPoint
+from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue
 import logging
 
 logger = logging.getLogger(__name__)
@@ -129,20 +129,47 @@ class VectorDB:
         # This restricts search to only documents from specified park
         query_filter = None
         if park_code:
-            query_filter = {
-                "must": [
-                    {"key": "park_code", "match": {"value": park_code}}
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="park_code",
+                        match=MatchValue(value=park_code)
+                    )
                 ]
-            }
+            )
 
         # Perform vector similarity search using Qdrant
         # Uses cosine similarity distance metric
-        results: List[ScoredPoint] = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=top_k,
-            query_filter=query_filter
-        )
+        try:
+            results: List[ScoredPoint] = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=top_k,
+                query_filter=query_filter
+            )
+        except Exception as e:
+            # If filtering fails (e.g., no index on park_code), fall back to unfiltered search
+            if park_code and "Index required" in str(e):
+                logger.warning(f"⚠ Park filtering failed (no index), falling back to unfiltered search. To fix: create keyword index for 'park_code' in Qdrant")
+                logger.warning(f"   Searching without park filter - results may include other parks")
+                results: List[ScoredPoint] = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=top_k * 3,  # Get more results to compensate for mixed parks
+                    query_filter=None  # No filter
+                )
+                # Manually filter results by park_code in Python
+                filtered_results = []
+                for result in results:
+                    if result.payload.get("park_code") == park_code:
+                        filtered_results.append(result)
+                        if len(filtered_results) >= top_k:
+                            break
+                results = filtered_results if filtered_results else results[:top_k]
+                logger.info(f"   Manual filtering: {len(results)} results from {park_code}")
+            else:
+                # Re-raise if it's a different error
+                raise
 
         # Format results into consistent dictionary structure
         formatted_results = []
