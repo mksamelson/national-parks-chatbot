@@ -245,6 +245,12 @@ Rewritten question:"""
             'According to Source 1, popular trails include...'
         """
         try:
+            # Log conversation history status for debugging
+            logger.info(f"Question: '{question}'")
+            logger.info(f"Conversation history provided: {conversation_history is not None and len(conversation_history) > 0 if conversation_history else False}")
+            if conversation_history:
+                logger.info(f"History length: {len(conversation_history)} messages")
+
             # Step 0a: Extract park context from conversation (if history exists)
             # This ensures we only search documents from the park being discussed
             # Example: User talks about "Glacier" → filter search to only Glacier docs
@@ -252,7 +258,11 @@ Rewritten question:"""
             if not active_park_code and conversation_history and len(conversation_history) > 0:
                 active_park_code = self._extract_park_context(question, conversation_history)
                 if active_park_code:
-                    logger.info(f"Auto-filtering to park: {active_park_code}")
+                    logger.info(f"✓ Park detected from conversation: {active_park_code}")
+                else:
+                    logger.warning("✗ No park detected from conversation history")
+
+            logger.info(f"Active park code for search: {active_park_code if active_park_code else 'None (searching all parks)'}")
 
             # Step 0b: Rewrite query with conversation context (if history exists)
             # This resolves pronouns like "there", "it" before vector search
