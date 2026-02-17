@@ -130,6 +130,76 @@ Rewritten question:"""
             logger.error(f"Query rewriting failed: {e}, using original question")
             return question  # Fallback to original question if rewriting fails
 
+    def _extract_park_context(
+        self,
+        question: str,
+        conversation_history: List[Dict]
+    ) -> str:
+        """
+        Extract the park being discussed from conversation history
+
+        When users are having a conversation about a specific park, we should
+        filter vector search to ONLY that park to prevent mixing information
+        from other parks.
+
+        Example:
+            User: "Tell me about Glacier National Park"
+            User: "What wildlife is there?"
+            -> Extract: "glac" (Glacier's park code)
+            -> Filter search to only Glacier documents
+
+        Args:
+            question: Current user question
+            conversation_history: Previous conversation messages
+
+        Returns:
+            Park code (4-letter) if a park is being discussed, None otherwise
+        """
+        # Common park names and their codes
+        PARK_MAPPINGS = {
+            'yellowstone': 'yell',
+            'yosemite': 'yose',
+            'zion': 'zion',
+            'glacier': 'glac',
+            'grand canyon': 'grca',
+            'rocky mountain': 'romo',
+            'great smoky': 'grsm',
+            'great smoky mountains': 'grsm',
+            'acadia': 'acad',
+            'olympic': 'olym',
+            'grand teton': 'grte',
+            'bryce canyon': 'brca',
+            'arches': 'arch',
+            'canyonlands': 'cany',
+            'sequoia': 'seki',
+            'kings canyon': 'seki',
+            'death valley': 'deva',
+            'joshua tree': 'jotr',
+            'shenandoah': 'shen',
+            'mount rainier': 'mora',
+            'crater lake': 'crla'
+        }
+
+        # Check last 6 messages (3 exchanges) for park mentions
+        recent_messages = conversation_history[-6:] if conversation_history else []
+
+        # Combine recent conversation text
+        conversation_text = " ".join([
+            msg['content'].lower()
+            for msg in recent_messages
+        ])
+
+        # Also check current question
+        conversation_text += " " + question.lower()
+
+        # Find park mentions (most recent takes precedence)
+        for park_name, park_code in PARK_MAPPINGS.items():
+            if park_name in conversation_text:
+                logger.info(f"Detected park context: {park_name} ({park_code})")
+                return park_code
+
+        return None
+
     async def answer_question(
         self,
         question: str,
@@ -175,7 +245,16 @@ Rewritten question:"""
             'According to Source 1, popular trails include...'
         """
         try:
-            # Step 0: Rewrite query with conversation context (if history exists)
+            # Step 0a: Extract park context from conversation (if history exists)
+            # This ensures we only search documents from the park being discussed
+            # Example: User talks about "Glacier" → filter search to only Glacier docs
+            active_park_code = park_code  # Use explicit park_code if provided
+            if not active_park_code and conversation_history and len(conversation_history) > 0:
+                active_park_code = self._extract_park_context(question, conversation_history)
+                if active_park_code:
+                    logger.info(f"Auto-filtering to park: {active_park_code}")
+
+            # Step 0b: Rewrite query with conversation context (if history exists)
             # This resolves pronouns like "there", "it" before vector search
             # Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
             search_query = question
@@ -189,10 +268,11 @@ Rewritten question:"""
 
             # Step 2: Retrieve relevant context using Qdrant vector search
             # Finds top_k most similar document chunks via cosine similarity
+            # Uses active_park_code to filter to specific park if conversation detected one
             context_chunks = self.vector_db.search(
                 query_vector=query_vector,
                 top_k=top_k,
-                park_code=park_code
+                park_code=active_park_code  # Automatically filters to detected park
             )
 
             # Handle case where no relevant documents found

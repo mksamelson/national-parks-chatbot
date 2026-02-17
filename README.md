@@ -35,6 +35,7 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
 6. **Response** → Answer + sources returned to frontend
 
 ### Key Design Decisions:
+- **Park context detection** → Auto-filters search to the park being discussed, preventing info mixing
 - **Conversational query rewriting** → Resolves pronouns before vector search for accurate context retrieval
 - **API-based embeddings** (Cohere) instead of local models → saves 300MB RAM
 - **Lazy loading** of RAG pipeline → <2 second startup for Render port binding
@@ -235,18 +236,28 @@ NPS_API_KEY=your_nps_api_key
 - Optional - leave empty or omit for single-turn questions
 - Backend is stateless - client manages conversation state
 
-**How Query Rewriting Works:**
-When conversation history is provided, the system automatically rewrites ambiguous questions before searching the database. This ensures accurate retrieval of relevant information.
+**How Conversational Context Works:**
 
-Example:
-1. User: "What are the best trails at Zion?"
+The system uses two techniques to maintain conversation context:
+
+1. **Park Context Detection** - Automatically detects which park you're discussing and filters search results to ONLY that park
+2. **Query Rewriting** - Rewrites ambiguous questions to resolve pronouns and references
+
+**Example conversation:**
+1. User: "Tell me about Glacier National Park"
+   - System detects: "Glacier" → filters all future searches to Glacier only
 2. User: "What wildlife will I see there?"
-   - **Rewritten internally:** "What wildlife can I see at Zion National Park?"
-   - This allows vector search to find Zion-specific wildlife information
+   - **Park filter:** Glacier (auto-detected)
+   - **Query rewritten:** "What wildlife can I see at Glacier National Park?"
+   - **Search:** Only Glacier documents retrieved
+   - **Result:** Accurate Glacier-specific wildlife information
 3. User: "Are they dangerous?"
-   - **Rewritten internally:** "Are the animals at Zion National Park dangerous?"
+   - **Park filter:** Still Glacier
+   - **Query rewritten:** "Are the animals at Glacier National Park dangerous?"
+   - **Search:** Only Glacier safety documents
+   - **Result:** Glacier-specific safety information
 
-This query rewriting happens transparently - you just include the conversation history, and the system handles the rest.
+**Key benefit:** Once you mention a park, all follow-up questions automatically focus on that park until you mention a different park. This prevents mixing information from multiple parks.
 
 **Example: Multi-turn conversation flow**
 ```python
