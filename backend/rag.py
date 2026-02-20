@@ -320,7 +320,9 @@ def generate_node(state: RAGState) -> dict:
     messages.append(HumanMessage(content=user_content))
 
     try:
-        llm = ChatGroq(model=MODEL, temperature=0)
+        # streaming=True enables token-level events via astream_events;
+        # invoke() behaviour is unchanged — still returns a complete response.
+        llm = ChatGroq(model=MODEL, temperature=0, streaming=True)
         response = llm.invoke(messages)
         answer = response.content
     except Exception as e:
@@ -462,6 +464,71 @@ class RAGPipeline:
             "question": question,
             "num_sources": result["num_sources"],
         }
+
+    async def astream_answer(
+        self,
+        question: str,
+        top_k: int = 5,
+        park_code: str = None,
+        conversation_history: List[Dict] = None,
+    ):
+        """
+        Stream answer tokens using LangGraph's astream_events.
+
+        Runs the full RAG graph and yields dicts as they become available:
+          {"type": "token",  "content": str}          — one per generated token
+          {"type": "done",   "sources": list,
+                             "num_sources": int}       — final metadata event
+          {"type": "error",  "message": str}           — if an exception occurs
+
+        The generate node uses streaming=True on ChatGroq so that LangGraph's
+        callback system emits on_chat_model_stream events for each token.
+        The no_results path (empty retrieval) emits the fallback text as a
+        single token followed immediately by the done event.
+        """
+        initial_state: RAGState = {
+            "question": question,
+            "top_k": top_k,
+            "conversation_history": conversation_history or [],
+            "park_code": park_code,
+            "active_park_code": park_code,
+            "search_query": question,
+            "query_vector": [],
+            "context_chunks": [],
+            "answer": "",
+            "sources": [],
+            "num_sources": 0,
+        }
+
+        try:
+            answer_started = False
+
+            async for event in self._graph.astream_events(initial_state, version="v2"):
+                event_kind = event.get("event", "")
+                node = event.get("metadata", {}).get("langgraph_node", "")
+
+                # Stream individual tokens from the generate node's LLM call
+                if event_kind == "on_chat_model_stream" and node == "generate":
+                    content = event["data"]["chunk"].content
+                    if content:
+                        answer_started = True
+                        yield {"type": "token", "content": content}
+
+                # Final graph completion — capture sources and handle no_results path
+                elif event_kind == "on_chain_end" and event.get("name") == "LangGraph":
+                    final_state = event["data"].get("output", {})
+                    sources = final_state.get("sources", [])
+                    num_sources = final_state.get("num_sources", 0)
+
+                    # no_results path: no LLM call was made, emit the fallback text
+                    if not answer_started and final_state.get("answer"):
+                        yield {"type": "token", "content": final_state["answer"]}
+
+                    yield {"type": "done", "sources": sources, "num_sources": num_sources}
+
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield {"type": "error", "message": str(e)}
 
     async def search(
         self,
