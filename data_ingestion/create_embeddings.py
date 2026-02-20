@@ -116,7 +116,7 @@ def initialize_qdrant() -> QdrantClient:
     return client
 
 
-def initialize_cohere() -> cohere.Client:
+def initialize_cohere() -> cohere.ClientV2:
     """Initialize Cohere client"""
     if not COHERE_API_KEY:
         print("Error: COHERE_API_KEY must be set in environment variables")
@@ -126,12 +126,12 @@ def initialize_cohere() -> cohere.Client:
         exit(1)
 
     print(f"Connecting to Cohere API...")
-    client = cohere.Client(COHERE_API_KEY)
+    client = cohere.ClientV2(COHERE_API_KEY)
     print(f"✓ Connected to Cohere (model: {COHERE_MODEL})")
     return client
 
 
-def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> List[List[float]]:
+def generate_embeddings(chunks: List[Dict], cohere_client: cohere.ClientV2) -> List[List[float]]:
     """Generate embeddings for all chunks using Cohere API with rate limiting"""
     print(f"Generating embeddings for {len(chunks)} chunks using Cohere...")
     print("(Free tier rate limit: 100k tokens/min - adding delays to stay under limit)")
@@ -157,10 +157,11 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
             response = cohere_client.embed(
                 texts=batch_texts,
                 model=COHERE_MODEL,
-                input_type="search_document"
+                input_type="search_document",
+                embedding_types=["float"],
             )
 
-            all_embeddings.extend(response.embeddings)
+            all_embeddings.extend(response.embeddings.float_)
 
             # Debug: Check dimension of first embedding in first batch
             if i == 0 and len(response.embeddings) > 0:
@@ -183,9 +184,10 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
             response = cohere_client.embed(
                 texts=batch_texts,
                 model=COHERE_MODEL,
-                input_type="search_document"
+                input_type="search_document",
+                embedding_types=["float"],
             )
-            all_embeddings.extend(response.embeddings)
+            all_embeddings.extend(response.embeddings.float_)
 
     print(f"✓ Generated {len(all_embeddings)} embeddings")
 
@@ -233,7 +235,7 @@ def upload_to_qdrant(client: QdrantClient, chunks: List[Dict], embeddings: List[
     print(f"✓ Uploaded {len(points)} points to Qdrant")
 
 
-def test_retrieval(qdrant_client: QdrantClient, cohere_client: cohere.Client):
+def test_retrieval(qdrant_client: QdrantClient, cohere_client: cohere.ClientV2):
     """Test retrieval with sample queries"""
     print("\n" + "=" * 50)
     print("Testing retrieval with sample queries...")
@@ -254,19 +256,20 @@ def test_retrieval(qdrant_client: QdrantClient, cohere_client: cohere.Client):
             query_response = cohere_client.embed(
                 texts=[query],
                 model=COHERE_MODEL,
-                input_type="search_query"
+                input_type="search_query",
+                embedding_types=["float"],
             )
-            query_vector = query_response.embeddings[0]
+            query_vector = query_response.embeddings.float_[0]
 
-            # Search
-            results = qdrant_client.search(
+            # Search (query_points replaces the deprecated .search() in qdrant-client >= 1.9)
+            results = qdrant_client.query_points(
                 collection_name=COLLECTION_NAME,
-                query_vector=query_vector,
-                limit=3
+                query=query_vector,
+                limit=3,
             )
 
-            print(f"Top {len(results)} results:")
-            for idx, result in enumerate(results, 1):
+            print(f"Top {len(results.points)} results:")
+            for idx, result in enumerate(results.points, 1):
                 park_name = result.payload.get("park_name", "Unknown")
                 text_preview = result.payload.get("text", "")[:100] + "..."
                 score = result.score

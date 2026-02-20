@@ -89,3 +89,6 @@ Thumbs.db
 
 # Claude Code
 claude-*-cwd
+
+# Windows reserved device name accidentally created as a file
+nul
