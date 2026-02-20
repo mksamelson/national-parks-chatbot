@@ -1,48 +1,51 @@
 """
 RAG (Retrieval Augmented Generation) Pipeline
 
-This module orchestrates the complete RAG pipeline for the National Parks chatbot.
+Built with LangGraph for pipeline orchestration and LangChain for prompt
+management and LLM interaction.
 
-What is RAG:
-RAG combines information retrieval with LLM generation to produce accurate,
-grounded answers. Instead of relying solely on the LLM's training data, RAG:
-1. Retrieves relevant documents from a knowledge base (vector database)
-2. Provides this context to the LLM as part of the prompt
-3. Generates an answer based on the retrieved context
+Architecture:
+    LangGraph StateGraph expresses the pipeline as a directed graph of nodes.
+    Each node performs one focused step; state is passed between nodes as a
+    typed dictionary so the data flow is explicit and inspectable.
 
-Why RAG for National Parks:
-- Accuracy: Answers grounded in official NPS documentation
-- Up-to-date: Vector DB can be updated without retraining LLM
-- Attribution: Can cite specific sources for transparency
-- Reduced hallucination: LLM answers from provided context, not memory
+    LangChain ChatPromptTemplate structures the query-rewriting prompt.
+    LangChain ChatGroq wraps the Groq API for all LLM calls (rewriting +
+    answer generation).  The existing embedding_model (Cohere) and vector_db
+    (Qdrant) modules are used unchanged.
 
-Architecture Flow:
-1. User asks question → FastAPI endpoint (main.py)
-2. Question → Cohere API → 1024-dim embedding vector (embeddings.py)
-3. Vector → Qdrant vector search → top_k similar document chunks (vector_db.py)
-4. Question + context chunks → Groq LLM → generated answer (llm.py)
-5. Answer + source metadata → FastAPI → frontend
-
-This module connects all components and handles the orchestration logic.
-
-Components:
-- embedding_model: Cohere API client for text→vector conversion
-- vector_db: Qdrant client for similarity search
-- llm_client: Groq API client for text generation
+Graph flow:
+    START
+      └─> extract_park          detect park from question / conversation
+            ├─> rewrite_query   (only when conversation history is present)
+            │     └─> embed_query
+            └─> embed_query     (direct, when no history)
+                  └─> retrieve
+                        ├─> generate    (context found)
+                        └─> no_results  (no context found)
+                              └─> END
 
 Author: Built with Claude Code
 Date: February 2026
 """
-from typing import Dict, List
+import logging
+from typing import Dict, List, Optional
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
+
 from embeddings import embedding_model
 from vector_db import vector_db
-from llm import llm_client
-import logging
 
 logger = logging.getLogger(__name__)
 
-# System prompt that guides the LLM's behavior
-# Sets the chatbot's personality, expertise domain, and response guidelines
+# ─────────────────────────── Constants ────────────────────────────────────────
+
+MODEL = "llama-3.3-70b-versatile"
+
 SYSTEM_PROMPT = """You are a helpful and knowledgeable National Parks expert assistant. Your role is to help visitors learn about U.S. National Parks, including their features, activities, wildlife, history, and visitor information.
 
 Guidelines:
@@ -54,386 +57,435 @@ Guidelines:
 - When answering follow-up questions, reference previous parts of the conversation naturally
 - If a user's question refers to "it" or "there", use conversation context to understand what they mean"""
 
+# Park name → 4-letter code (used for detection)
+PARK_MAPPINGS: Dict[str, str] = {
+    'yellowstone': 'yell',
+    'yosemite': 'yose',
+    'zion': 'zion',
+    'glacier': 'glac',
+    'grand canyon': 'grca',
+    'rocky mountain': 'romo',
+    'great smoky': 'grsm',
+    'great smoky mountains': 'grsm',
+    'acadia': 'acad',
+    'olympic': 'olym',
+    'grand teton': 'grte',
+    'bryce canyon': 'brca',
+    'arches': 'arch',
+    'canyonlands': 'cany',
+    'sequoia': 'seki',
+    'kings canyon': 'seki',
+    'death valley': 'deva',
+    'joshua tree': 'jotr',
+    'shenandoah': 'shen',
+    'mount rainier': 'mora',
+    'crater lake': 'crla',
+}
+
+# 4-letter code → full park name (used for display and prompts)
+CODE_TO_NAME: Dict[str, str] = {
+    'yell': 'Yellowstone National Park',
+    'yose': 'Yosemite National Park',
+    'zion': 'Zion National Park',
+    'glac': 'Glacier National Park',
+    'grca': 'Grand Canyon National Park',
+    'romo': 'Rocky Mountain National Park',
+    'grsm': 'Great Smoky Mountains National Park',
+    'acad': 'Acadia National Park',
+    'olym': 'Olympic National Park',
+    'grte': 'Grand Teton National Park',
+    'brca': 'Bryce Canyon National Park',
+    'arch': 'Arches National Park',
+    'cany': 'Canyonlands National Park',
+    'seki': 'Sequoia and Kings Canyon National Parks',
+    'deva': 'Death Valley National Park',
+    'jotr': 'Joshua Tree National Park',
+    'shen': 'Shenandoah National Park',
+    'mora': 'Mount Rainier National Park',
+    'crla': 'Crater Lake National Park',
+}
+
+# ─────────────────────────── LangChain prompt template ────────────────────────
+
+# Used in rewrite_query_node via LCEL: REWRITE_PROMPT | ChatGroq(...)
+REWRITE_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a helpful assistant that rewrites questions to be clear and "
+        "specific for database search. Output only the rewritten question, nothing else.",
+    ),
+    (
+        "human",
+        "Given the conversation history below, rewrite the user's latest question "
+        "to be self-contained and specific. Replace pronouns and references (like "
+        "'it', 'there', 'that', 'them') with the actual entities they refer to.\n\n"
+        "Conversation history:\n{conversation_text}\n\n"
+        "Latest question: {question}{park_context}\n\n"
+        "Rewrite this question to be clear and specific, suitable for searching a "
+        "database. Include the park name or specific topic being discussed. Keep it "
+        "concise (under 20 words).\n\nRewritten question:",
+    ),
+])
+
+# ─────────────────────────── LangGraph state schema ───────────────────────────
+
+class RAGState(TypedDict):
+    question: str               # Original user question (never modified)
+    top_k: int                  # Number of chunks to retrieve
+    conversation_history: List[Dict]
+    park_code: Optional[str]    # Explicitly provided by the caller
+    active_park_code: Optional[str]  # Detected from context, or same as park_code
+    search_query: str           # Original or rewritten query sent to the embedder
+    query_vector: List[float]   # 1024-dim Cohere embedding of search_query
+    context_chunks: List[Dict]  # Retrieved documents from Qdrant
+    answer: str                 # Final LLM-generated answer
+    sources: List[Dict]         # Source metadata for frontend attribution
+    num_sources: int
+
+
+# ─────────────────────────── Helper ───────────────────────────────────────────
+
+def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[str]:
+    """
+    Detect which park is being discussed.
+
+    Priority order (prevents assistant responses from hijacking context):
+      1. Current question  — allows the user to explicitly switch parks
+      2. Most recent user message mentioning a park
+    Only user messages are checked; assistant messages are intentionally ignored
+    to avoid context drift when the assistant compares multiple parks.
+    """
+    question_lower = question.lower()
+    for park_name, code in PARK_MAPPINGS.items():
+        if park_name in question_lower:
+            logger.info(f"Park detected in current question: {park_name} ({code})")
+            return code
+
+    user_messages = [m for m in conversation_history[-6:] if m.get("role") == "user"]
+    for msg in reversed(user_messages):
+        msg_lower = msg["content"].lower()
+        for park_name, code in PARK_MAPPINGS.items():
+            if park_name in msg_lower:
+                logger.info(f"Park detected from user history: {park_name} ({code})")
+                return code
+
+    logger.info("No park detected")
+    return None
+
+
+# ─────────────────────────── Graph nodes ──────────────────────────────────────
+
+def extract_park_node(state: RAGState) -> dict:
+    """
+    Node 1 — Detect the active park from the question and conversation history.
+
+    If the caller already supplied an explicit park_code, that takes precedence.
+    Otherwise, scan the current question then recent user messages for a park name.
+    """
+    if state.get("park_code"):
+        return {"active_park_code": state["park_code"]}
+
+    active_park_code = _detect_park(
+        state["question"],
+        state.get("conversation_history") or [],
+    )
+    logger.info(f"Active park: {active_park_code or 'none (searching all parks)'}")
+    return {"active_park_code": active_park_code}
+
+
+def rewrite_query_node(state: RAGState) -> dict:
+    """
+    Node 2 (conditional) — Rewrite the question using LangChain LCEL.
+
+    Resolves pronouns and references (e.g. "there", "it") so that the
+    embedding step receives a self-contained query suitable for vector search.
+    Falls back to the original question if the LLM call fails.
+    """
+    question = state["question"]
+    history = state.get("conversation_history") or []
+    active_park_code = state.get("active_park_code")
+
+    conversation_text = "\n".join([
+        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+        for m in history[-4:]
+    ])
+
+    park_context = ""
+    if active_park_code:
+        park_name = CODE_TO_NAME.get(active_park_code, active_park_code.upper())
+        park_context = (
+            f"\n\nIMPORTANT: The conversation is about {park_name}. "
+            "Ensure the rewritten question includes this park name if relevant."
+        )
+
+    try:
+        llm = ChatGroq(model=MODEL, temperature=0.3, max_tokens=100)
+        chain = REWRITE_PROMPT | llm
+        response = chain.invoke({
+            "conversation_text": conversation_text,
+            "question": question,
+            "park_context": park_context,
+        })
+        rewritten = response.content.strip().strip('"').strip("'").strip()
+        logger.info(f"Query rewrite: '{question}' -> '{rewritten}'")
+        return {"search_query": rewritten}
+
+    except Exception as e:
+        logger.error(f"Query rewriting failed: {e}, using original question")
+        return {"search_query": question}
+
+
+def embed_query_node(state: RAGState) -> dict:
+    """
+    Node 3 — Convert the search query to a 1024-dim embedding vector via Cohere.
+    """
+    query_vector = embedding_model.encode(state["search_query"])
+    return {"query_vector": query_vector}
+
+
+def retrieve_node(state: RAGState) -> dict:
+    """
+    Node 4 — Retrieve the top-k most relevant document chunks from Qdrant.
+
+    Filters by active_park_code when a park has been detected so that
+    results stay scoped to the park the user is asking about.
+    """
+    context_chunks = vector_db.search(
+        query_vector=state["query_vector"],
+        top_k=state["top_k"],
+        park_code=state.get("active_park_code"),
+    )
+    logger.info(f"Retrieved {len(context_chunks)} chunks")
+
+    if state.get("active_park_code") and context_chunks:
+        parks_found = {c.get("park_code") for c in context_chunks}
+        expected = state["active_park_code"]
+        if expected not in parks_found or len(parks_found) > 1:
+            logger.warning(f"Park mismatch: expected {expected}, got {parks_found}")
+        else:
+            logger.info(f"All results from expected park: {expected}")
+
+    return {"context_chunks": context_chunks}
+
+
+def generate_node(state: RAGState) -> dict:
+    """
+    Node 5 — Generate an answer using LangChain ChatGroq with retrieved context.
+
+    Builds a message list of [SystemMessage, *history, HumanMessage] and
+    invokes the Groq LLM.  The user message contains the numbered context
+    sources followed by the question.
+    """
+    question = state["question"]
+    context_chunks = state["context_chunks"]
+    active_park_code = state.get("active_park_code")
+    history = state.get("conversation_history") or []
+
+    # Format retrieved chunks as numbered sources
+    context_text = "\n\n".join([
+        f"[Source {i+1} - {chunk['park_name']}]\n{chunk['text']}"
+        for i, chunk in enumerate(context_chunks)
+    ])
+
+    park_name = (
+        context_chunks[0].get("park_name", "the park being discussed")
+        if context_chunks else "national parks"
+    )
+
+    # Explicit park context statement keeps the LLM focused on the right park
+    park_context_statement = ""
+    if active_park_code and context_chunks:
+        park_context_statement = (
+            f"IMPORTANT CONTEXT: The user is currently asking about {park_name}. "
+            f"All context provided below is specifically about {park_name}. "
+            f"When the user uses words like 'there', 'it', or 'the park', "
+            f"they are referring to {park_name}.\n\n"
+        )
+
+    user_content = (
+        f"{park_context_statement}"
+        f"Context from National Parks Service:\n\n{context_text}\n\n"
+        f"User Question: {question}\n\n"
+        f"Please answer the question based on the context provided above. "
+        f"Remember that all context is about {park_name}."
+    )
+
+    # Assemble messages: system + conversation history + final user prompt
+    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    for msg in history:
+        if msg["role"] == "user":
+            messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            messages.append(AIMessage(content=msg["content"]))
+    messages.append(HumanMessage(content=user_content))
+
+    try:
+        llm = ChatGroq(model=MODEL, temperature=0)
+        response = llm.invoke(messages)
+        answer = response.content
+    except Exception as e:
+        logger.error(f"LLM generation failed: {e}")
+        raise
+
+    sources = [
+        {
+            "park_name": chunk["park_name"],
+            "park_code": chunk["park_code"],
+            "url": chunk["source_url"],
+            "score": chunk["score"],
+        }
+        for chunk in context_chunks
+    ]
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "num_sources": len(context_chunks),
+    }
+
+
+def no_results_node(state: RAGState) -> dict:
+    """
+    Node 5 (alternate) — Return a graceful message when retrieval finds nothing.
+    """
+    return {
+        "answer": (
+            "I couldn't find relevant information to answer your question. "
+            "Please try rephrasing or ask about specific national parks."
+        ),
+        "sources": [],
+        "num_sources": 0,
+    }
+
+
+# ─────────────────────────── Routing functions ────────────────────────────────
+
+def _route_after_park_extraction(state: RAGState) -> str:
+    """Rewrite the query only when there is conversation history to draw from."""
+    if state.get("conversation_history"):
+        return "rewrite_query"
+    return "embed_query"
+
+
+def _route_after_retrieval(state: RAGState) -> str:
+    """Generate an answer only when context chunks were actually found."""
+    if state.get("context_chunks"):
+        return "generate"
+    return "no_results"
+
+
+# ─────────────────────────── Graph construction ───────────────────────────────
+
+def _build_graph():
+    """Compile the LangGraph StateGraph for the RAG pipeline."""
+    graph = StateGraph(RAGState)
+
+    graph.add_node("extract_park", extract_park_node)
+    graph.add_node("rewrite_query", rewrite_query_node)
+    graph.add_node("embed_query", embed_query_node)
+    graph.add_node("retrieve", retrieve_node)
+    graph.add_node("generate", generate_node)
+    graph.add_node("no_results", no_results_node)
+
+    graph.add_edge(START, "extract_park")
+    graph.add_conditional_edges("extract_park", _route_after_park_extraction)
+    graph.add_edge("rewrite_query", "embed_query")
+    graph.add_edge("embed_query", "retrieve")
+    graph.add_conditional_edges("retrieve", _route_after_retrieval)
+    graph.add_edge("generate", END)
+    graph.add_edge("no_results", END)
+
+    return graph.compile()
+
+
+# ─────────────────────────── Public interface ─────────────────────────────────
 
 class RAGPipeline:
     """
-    RAG Pipeline orchestrator for question answering
+    RAG Pipeline using LangGraph for orchestration and LangChain for prompting.
 
-    Coordinates the RAG process with conversational query rewriting:
-    1. Query Rewriting: Rewrite question with conversation context (if history exists)
-    2. Embedding: Convert question to vector (Cohere)
-    3. Retrieval: Find similar documents (Qdrant)
-    4. Generation: Produce answer with context (Groq)
+    The pipeline is expressed as a directed graph:
+        extract_park → (rewrite_query →) embed_query → retrieve → generate
+
+    Public interface is identical to the original RAGPipeline so main.py
+    requires no changes.
     """
 
     def __init__(self):
-        """Initialize pipeline with global API clients"""
         self.embedding_model = embedding_model
         self.vector_db = vector_db
-        self.llm = llm_client
-
-    def _get_park_name_from_code(self, park_code: str) -> str:
-        """
-        Convert park code to full park name for display
-
-        Args:
-            park_code: 4-letter park code (e.g., 'glac', 'yell')
-
-        Returns:
-            Full park name (e.g., 'Glacier National Park')
-        """
-        CODE_TO_NAME = {
-            'yell': 'Yellowstone National Park',
-            'yose': 'Yosemite National Park',
-            'zion': 'Zion National Park',
-            'glac': 'Glacier National Park',
-            'grca': 'Grand Canyon National Park',
-            'romo': 'Rocky Mountain National Park',
-            'grsm': 'Great Smoky Mountains National Park',
-            'acad': 'Acadia National Park',
-            'olym': 'Olympic National Park',
-            'grte': 'Grand Teton National Park',
-            'brca': 'Bryce Canyon National Park',
-            'arch': 'Arches National Park',
-            'cany': 'Canyonlands National Park',
-            'seki': 'Sequoia and Kings Canyon National Parks',
-            'deva': 'Death Valley National Park',
-            'jotr': 'Joshua Tree National Park',
-            'shen': 'Shenandoah National Park',
-            'mora': 'Mount Rainier National Park',
-            'crla': 'Crater Lake National Park'
-        }
-        return CODE_TO_NAME.get(park_code, f"Park {park_code}")
-
-    def _rewrite_query_with_context(
-        self,
-        question: str,
-        conversation_history: List[Dict],
-        park_code: str = None
-    ) -> str:
-        """
-        Rewrite a question to include context from conversation history
-
-        This is crucial for conversational RAG: pronouns and references like
-        "there", "it", "them" need to be resolved BEFORE vector search,
-        otherwise the search won't retrieve relevant documents.
-
-        Example:
-            Q1: "What are the best trails at Zion?"
-            Q2: "What wildlife will I see there?"
-            Rewritten Q2: "What wildlife can I see at Zion National Park?"
-
-        Args:
-            question: Current user question (may contain pronouns/references)
-            conversation_history: Previous conversation messages
-            park_code: Optional detected park code to guide rewriting
-
-        Returns:
-            Rewritten question with context resolved, suitable for vector search
-        """
-        # Build conversation context for the rewriting prompt
-        conversation_text = "\n".join([
-            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-            for msg in conversation_history[-4:]  # Use last 4 messages (2 exchanges)
-        ])
-
-        # If we detected a park, include it explicitly in the rewriting prompt
-        park_context = ""
-        if park_code:
-            park_name = self._get_park_name_from_code(park_code)
-            park_context = f"\n\nIMPORTANT: The conversation is about {park_name}. Ensure the rewritten question includes this park name if relevant."
-
-        rewrite_prompt = f"""Given the conversation history below, rewrite the user's latest question to be self-contained and specific. Replace pronouns and references (like "it", "there", "that", "them") with the actual entities they refer to.
-
-Conversation history:
-{conversation_text}
-
-Latest question: {question}{park_context}
-
-Rewrite this question to be clear and specific, suitable for searching a database. Include the park name or specific topic being discussed. Keep it concise (under 20 words).
-
-Rewritten question:"""
-
-        try:
-            rewritten = self.llm.generate(
-                prompt=rewrite_prompt,
-                system_prompt="You are a helpful assistant that rewrites questions to be clear and specific for database search. Output only the rewritten question, nothing else.",
-                temperature=0.3,  # Lower temperature for more focused rewriting
-                max_tokens=100
-            )
-            # Clean up the response (remove quotes, extra whitespace)
-            rewritten = rewritten.strip().strip('"').strip("'").strip()
-
-            logger.info(f"Query rewriting: '{question}' -> '{rewritten}'")
-            return rewritten
-
-        except Exception as e:
-            logger.error(f"Query rewriting failed: {e}, using original question")
-            return question  # Fallback to original question if rewriting fails
-
-    def _extract_park_context(
-        self,
-        question: str,
-        conversation_history: List[Dict]
-    ) -> str:
-        """
-        Extract the park being discussed from conversation history
-
-        When users are having a conversation about a specific park, we should
-        filter vector search to ONLY that park to prevent mixing information
-        from other parks.
-
-        CRITICAL: This method prioritizes park mentions in the following order:
-        1. Current question (highest priority - allows explicit park switching)
-        2. Most recent USER message mentioning a park (ignores assistant messages)
-
-        This prevents assistant responses that mention multiple parks for comparison
-        from incorrectly changing the park context.
-
-        Example:
-            User: "Tell me about Glacier National Park"
-            Assistant: "Glacier is similar to Yellowstone..." (mentions both parks)
-            User: "What wildlife is there?"
-            -> Extract: "glac" (from user's last park mention, NOT Yellowstone from assistant)
-            -> Filter search to only Glacier documents
-
-        Args:
-            question: Current user question
-            conversation_history: Previous conversation messages
-
-        Returns:
-            Park code (4-letter) if a park is being discussed, None otherwise
-        """
-        # Common park names and their codes
-        PARK_MAPPINGS = {
-            'yellowstone': 'yell',
-            'yosemite': 'yose',
-            'zion': 'zion',
-            'glacier': 'glac',
-            'grand canyon': 'grca',
-            'rocky mountain': 'romo',
-            'great smoky': 'grsm',
-            'great smoky mountains': 'grsm',
-            'acadia': 'acad',
-            'olympic': 'olym',
-            'grand teton': 'grte',
-            'bryce canyon': 'brca',
-            'arches': 'arch',
-            'canyonlands': 'cany',
-            'sequoia': 'seki',
-            'kings canyon': 'seki',
-            'death valley': 'deva',
-            'joshua tree': 'jotr',
-            'shenandoah': 'shen',
-            'mount rainier': 'mora',
-            'crater lake': 'crla'
-        }
-
-        # PRIORITY 1: Check current question FIRST (allows explicit park switching)
-        question_lower = question.lower()
-        for park_name, park_code in PARK_MAPPINGS.items():
-            if park_name in question_lower:
-                logger.info(f"✓ Park in current question: {park_name} ({park_code})")
-                return park_code
-
-        # PRIORITY 2: Check USER messages in conversation history (newest first)
-        # Only check user messages to avoid assistant responses changing context
-        recent_messages = conversation_history[-6:] if conversation_history else []
-
-        # Filter to user messages only
-        user_messages = [msg for msg in recent_messages if msg.get('role') == 'user']
-
-        # Process in reverse order (most recent first)
-        for msg in reversed(user_messages):
-            msg_text = msg['content'].lower()
-            for park_name, park_code in PARK_MAPPINGS.items():
-                if park_name in msg_text:
-                    logger.info(f"✓ Park from user message: {park_name} ({park_code})")
-                    logger.debug(f"  Found in message: '{msg['content'][:80]}...'")
-                    return park_code
-
-        logger.info("✗ No park detected in question or recent user messages")
-        return None
+        self._graph = _build_graph()
 
     async def answer_question(
         self,
         question: str,
         top_k: int = 5,
         park_code: str = None,
-        conversation_history: List[Dict] = None
+        conversation_history: List[Dict] = None,
     ) -> Dict:
         """
-        Answer a question using the complete RAG pipeline
-
-        This is the main entry point for question answering. It performs:
-        1. Query rewriting with conversation context (if history provided)
-        2. Question embedding (Cohere API)
-        3. Vector similarity search (Qdrant)
-        4. Context-aware answer generation (Groq API)
+        Answer a question using the complete RAG pipeline.
 
         Args:
             question: User question about national parks
-                     (e.g., "What wildlife can I see in Yellowstone?")
             top_k: Number of context chunks to retrieve (default: 5)
-                  More chunks = more context but slower/more expensive
-            park_code: Optional 4-letter park code to filter results
-                      (e.g., 'yell' for Yellowstone, 'yose' for Yosemite)
-                      If None, searches across all parks
-            conversation_history: Optional list of previous messages for multi-turn conversations
-                                Each message is a dict with 'role' and 'content' keys
-                                (e.g., [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}])
+            park_code: Optional 4-letter park code to restrict search (e.g. 'yell')
+            conversation_history: Previous messages as list of
+                                  {'role': 'user'|'assistant', 'content': str} dicts
 
         Returns:
-            Dict containing:
-            - answer (str): Generated answer with source citations
-            - sources (List[Dict]): List of source metadata for attribution
-            - question (str): Original question (echo back)
-            - num_sources (int): Number of sources used
-
-        Example:
-            >>> pipeline = RAGPipeline()
-            >>> result = await pipeline.answer_question(
-            ...     "What are the best trails in Yellowstone?",
-            ...     top_k=5
-            ... )
-            >>> print(result['answer'])
-            'According to Source 1, popular trails include...'
+            Dict with keys: answer, sources, question, num_sources
         """
-        try:
-            # Log conversation history status for debugging
-            logger.info(f"Question: '{question}'")
-            logger.info(f"Conversation history provided: {conversation_history is not None and len(conversation_history) > 0 if conversation_history else False}")
-            if conversation_history:
-                logger.info(f"History length: {len(conversation_history)} messages")
+        logger.info(
+            f"Question: '{question}' | history: {len(conversation_history or [])} msgs"
+        )
 
-            # Step 0a: Extract park context from conversation (if history exists)
-            # This ensures we only search documents from the park being discussed
-            # Example: User talks about "Glacier" → filter search to only Glacier docs
-            active_park_code = park_code  # Use explicit park_code if provided
-            if not active_park_code and conversation_history and len(conversation_history) > 0:
-                active_park_code = self._extract_park_context(question, conversation_history)
-                if active_park_code:
-                    logger.info(f"✓ Park detected from conversation: {active_park_code}")
-                else:
-                    logger.warning("✗ No park detected from conversation history")
+        initial_state: RAGState = {
+            "question": question,
+            "top_k": top_k,
+            "conversation_history": conversation_history or [],
+            "park_code": park_code,
+            "active_park_code": park_code,
+            "search_query": question,
+            "query_vector": [],
+            "context_chunks": [],
+            "answer": "",
+            "sources": [],
+            "num_sources": 0,
+        }
 
-            logger.info(f"Active park code for search: {active_park_code if active_park_code else 'None (searching all parks)'}")
+        result = await self._graph.ainvoke(initial_state)
 
-            # Step 0b: Rewrite query with conversation context (if history exists)
-            # This resolves pronouns like "there", "it" before vector search
-            # Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
-            # Pass detected park_code to help guide rewriting
-            search_query = question
-            if conversation_history and len(conversation_history) > 0:
-                search_query = self._rewrite_query_with_context(
-                    question,
-                    conversation_history,
-                    park_code=active_park_code  # Pass detected park to guide rewriting
-                )
-
-            # Step 1: Generate question embedding using Cohere API
-            # Converts natural language question → 1024-dim vector
-            # Uses the rewritten query for better context-aware search
-            query_vector = self.embedding_model.encode(search_query)
-
-            # Step 2: Retrieve relevant context using Qdrant vector search
-            # Finds top_k most similar document chunks via cosine similarity
-            # Uses active_park_code to filter to specific park if conversation detected one
-            context_chunks = self.vector_db.search(
-                query_vector=query_vector,
-                top_k=top_k,
-                park_code=active_park_code  # Automatically filters to detected park
-            )
-
-            # Validate search results match expected park
-            logger.info(f"Search returned {len(context_chunks)} chunks")
-            if active_park_code and context_chunks:
-                parks_in_results = {chunk.get('park_code') for chunk in context_chunks}
-                if len(parks_in_results) > 1 or active_park_code not in parks_in_results:
-                    logger.warning(f"⚠ Park mismatch: Expected {active_park_code}, got {parks_in_results}")
-                else:
-                    logger.info(f"✓ All results from expected park: {active_park_code}")
-
-            # Handle case where no relevant documents found
-            if not context_chunks:
-                return {
-                    "answer": "I couldn't find relevant information to answer your question. Please try rephrasing or ask about specific national parks.",
-                    "sources": [],
-                    "question": question,
-                    "num_sources": 0
-                }
-
-            # Step 3: Generate answer with LLM using retrieved context
-            # Groq API generates answer grounded in NPS documentation
-            # Includes conversation history and detected park context
-            result = self.llm.generate_with_context(
-                question=question,
-                context_chunks=context_chunks,
-                system_prompt=SYSTEM_PROMPT,
-                conversation_history=conversation_history,
-                park_code=active_park_code  # Tell LLM which park is being discussed
-            )
-
-            # Add metadata for frontend display
-            result["question"] = question
-            result["num_sources"] = len(context_chunks)
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error in RAG pipeline: {e}")
-            raise
+        return {
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "question": question,
+            "num_sources": result["num_sources"],
+        }
 
     async def search(
         self,
         query: str,
         top_k: int = 10,
-        park_code: str = None
+        park_code: str = None,
     ) -> List[Dict]:
         """
-        Direct vector search without LLM generation
-
-        This endpoint performs only the retrieval step (no generation).
-        Useful for debugging, exploring the knowledge base, or building
-        custom UIs that display raw search results.
+        Direct vector search without LLM generation.
 
         Args:
-            query: Search query (e.g., "hiking trails")
+            query: Search query text
             top_k: Number of results to return (default: 10)
             park_code: Optional park code filter
 
         Returns:
-            List[Dict]: Search results with metadata, each containing:
-            - id: Qdrant point ID
-            - score: Similarity score (0-1)
-            - text: Document chunk text
-            - park_code: Park identifier
-            - park_name: Full park name
-            - source_url: Original document URL
-            - chunk_id: Unique chunk identifier
-
-        Example:
-            >>> pipeline = RAGPipeline()
-            >>> results = await pipeline.search("geysers", top_k=5)
-            >>> print(results[0]['park_name'])
-            'Yellowstone National Park'
+            List of matching document chunks with metadata
         """
-        try:
-            # Generate query embedding using Cohere API
-            query_vector = self.embedding_model.encode(query)
-
-            # Retrieve results from Qdrant (no LLM generation)
-            results = self.vector_db.search(
-                query_vector=query_vector,
-                top_k=top_k,
-                park_code=park_code
-            )
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Error in search: {e}")
-            raise
+        query_vector = self.embedding_model.encode(query)
+        return self.vector_db.search(
+            query_vector=query_vector,
+            top_k=top_k,
+            park_code=park_code,
+        )
 
 
 # Global instance
