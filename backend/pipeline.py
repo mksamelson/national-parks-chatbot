@@ -157,7 +157,7 @@ def _get_vectorstore() -> QdrantVectorStore:
         _vectorstore = QdrantVectorStore(
             client=_get_qdrant_client(),
             collection_name=COLLECTION,
-            embeddings=_get_embeddings(),
+            embedding=_get_embeddings(),
             content_payload_key="text",  # matches payload key used when building the index
         )
     return _vectorstore
