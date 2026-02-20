@@ -56,7 +56,7 @@ def get_rag_pipeline():
     """Load the RAG pipeline on first use to keep startup time under 2 seconds."""
     global _rag_pipeline
     if _rag_pipeline is None:
-        from rag import rag_pipeline as rp
+        from pipeline import rag_pipeline as rp
         _rag_pipeline = rp
     return _rag_pipeline
 

@@ -1,50 +1,43 @@
 """
-RAG (Retrieval Augmented Generation) Pipeline
+RAG Pipeline — National Parks Chatbot
 
-Built with LangGraph for pipeline orchestration and LangChain for prompt
-management and LLM interaction.
-
-Architecture:
-    LangGraph StateGraph expresses the pipeline as a directed graph of nodes.
-    Each node performs one focused step; state is passed between nodes as a
-    typed dictionary so the data flow is explicit and inspectable.
-
-    LangChain ChatPromptTemplate structures the query-rewriting prompt.
-    LangChain ChatGroq wraps the Groq API for all LLM calls (rewriting +
-    answer generation).  The existing embedding_model (Cohere) and vector_db
-    (Qdrant) modules are used unchanged.
+Implements the full retrieval-augmented generation pipeline using native
+LangChain integrations: CohereEmbeddings, QdrantVectorStore, and ChatGroq.
+LangGraph orchestrates the pipeline as a directed graph of nodes.
 
 Graph flow:
     START
       └─> extract_park          detect park from question / conversation
             ├─> rewrite_query   (only when conversation history is present)
-            │     └─> embed_query
-            └─> embed_query     (direct, when no history)
-                  └─> retrieve
-                        ├─> generate    (context found)
-                        └─> no_results  (no context found)
-                              └─> END
+            │     └─> retrieve
+            └─> retrieve        (direct, when no history)
+                  ├─> generate    (context found)
+                  └─> no_results  (no context found)
+                        └─> END
 
 Author: Built with Claude Code
 Date: February 2026
 """
 import logging
+import os
 from typing import Dict, List, Optional
 
+from langchain_cohere import CohereEmbeddings
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
+from langchain_qdrant import QdrantVectorStore
 from langgraph.graph import END, START, StateGraph
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 from typing_extensions import TypedDict
-
-from embeddings import embedding_model
-from vector_db import vector_db
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────── Constants ────────────────────────────────────────
 
 MODEL = "llama-3.3-70b-versatile"
+COLLECTION = "national_parks"
 
 SYSTEM_PROMPT = """You are a helpful and knowledgeable National Parks expert assistant. Your role is to help visitors learn about U.S. National Parks, including their features, activities, wildlife, history, and visitor information.
 
@@ -127,6 +120,49 @@ REWRITE_PROMPT = ChatPromptTemplate.from_messages([
     ),
 ])
 
+# ─────────────────────────── Lazy client initializers ─────────────────────────
+
+_embeddings: Optional[CohereEmbeddings] = None
+_qdrant_client: Optional[QdrantClient] = None
+_vectorstore: Optional[QdrantVectorStore] = None
+
+
+def _get_embeddings() -> CohereEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        api_key = os.getenv("COHERE_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("COHERE_API_KEY environment variable not set")
+        _embeddings = CohereEmbeddings(
+            model="embed-english-v3.0",
+            cohere_api_key=api_key,
+        )
+    return _embeddings
+
+
+def _get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        url = os.getenv("QDRANT_URL", "").strip()
+        api_key = os.getenv("QDRANT_API_KEY", "").strip()
+        if not url or not api_key:
+            raise ValueError("QDRANT_URL and QDRANT_API_KEY must be set")
+        _qdrant_client = QdrantClient(url=url, api_key=api_key)
+    return _qdrant_client
+
+
+def _get_vectorstore() -> QdrantVectorStore:
+    global _vectorstore
+    if _vectorstore is None:
+        _vectorstore = QdrantVectorStore(
+            client=_get_qdrant_client(),
+            collection_name=COLLECTION,
+            embeddings=_get_embeddings(),
+            content_payload_key="text",  # matches payload key used when building the index
+        )
+    return _vectorstore
+
+
 # ─────────────────────────── LangGraph state schema ───────────────────────────
 
 class RAGState(TypedDict):
@@ -135,8 +171,7 @@ class RAGState(TypedDict):
     conversation_history: List[Dict]
     park_code: Optional[str]    # Explicitly provided by the caller
     active_park_code: Optional[str]  # Detected from context, or same as park_code
-    search_query: str           # Original or rewritten query sent to the embedder
-    query_vector: List[float]   # 1024-dim Cohere embedding of search_query
+    search_query: str           # Original or rewritten query sent to the retriever
     context_chunks: List[Dict]  # Retrieved documents from Qdrant
     answer: str                 # Final LLM-generated answer
     sources: List[Dict]         # Source metadata for frontend attribution
@@ -198,7 +233,7 @@ def rewrite_query_node(state: RAGState) -> dict:
     Node 2 (conditional) — Rewrite the question using LangChain LCEL.
 
     Resolves pronouns and references (e.g. "there", "it") so that the
-    embedding step receives a self-contained query suitable for vector search.
+    retrieval step receives a self-contained query suitable for vector search.
     Falls back to the original question if the LLM call fails.
     """
     question = state["question"]
@@ -235,42 +270,62 @@ def rewrite_query_node(state: RAGState) -> dict:
         return {"search_query": question}
 
 
-def embed_query_node(state: RAGState) -> dict:
-    """
-    Node 3 — Convert the search query to a 1024-dim embedding vector via Cohere.
-    """
-    query_vector = embedding_model.encode(state["search_query"])
-    return {"query_vector": query_vector}
-
-
 def retrieve_node(state: RAGState) -> dict:
     """
-    Node 4 — Retrieve the top-k most relevant document chunks from Qdrant.
+    Node 3 — Retrieve the top-k most relevant document chunks from Qdrant.
 
-    Filters by active_park_code when a park has been detected so that
-    results stay scoped to the park the user is asking about.
+    QdrantVectorStore handles embedding internally, so no separate embed_query
+    node is needed.  Filters by active_park_code when a park has been detected.
     """
-    context_chunks = vector_db.search(
-        query_vector=state["query_vector"],
-        top_k=state["top_k"],
-        park_code=state.get("active_park_code"),
+    search_query = state["search_query"]
+    top_k = state["top_k"]
+    active_park_code = state.get("active_park_code")
+
+    park_filter = None
+    if active_park_code:
+        park_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="park_code",
+                    match=MatchValue(value=active_park_code),
+                )
+            ]
+        )
+
+    vectorstore = _get_vectorstore()
+    docs_with_scores = vectorstore.similarity_search_with_score(
+        query=search_query,
+        k=top_k,
+        filter=park_filter,
     )
+
+    context_chunks = [
+        {
+            "id": i,
+            "score": score,
+            "text": doc.page_content,
+            "park_code": doc.metadata.get("park_code", ""),
+            "park_name": doc.metadata.get("park_name", ""),
+            "source_url": doc.metadata.get("source_url", ""),
+            "chunk_id": doc.metadata.get("chunk_id", ""),
+        }
+        for i, (doc, score) in enumerate(docs_with_scores)
+    ]
     logger.info(f"Retrieved {len(context_chunks)} chunks")
 
-    if state.get("active_park_code") and context_chunks:
+    if active_park_code and context_chunks:
         parks_found = {c.get("park_code") for c in context_chunks}
-        expected = state["active_park_code"]
-        if expected not in parks_found or len(parks_found) > 1:
-            logger.warning(f"Park mismatch: expected {expected}, got {parks_found}")
+        if active_park_code not in parks_found or len(parks_found) > 1:
+            logger.warning(f"Park mismatch: expected {active_park_code}, got {parks_found}")
         else:
-            logger.info(f"All results from expected park: {expected}")
+            logger.info(f"All results from expected park: {active_park_code}")
 
     return {"context_chunks": context_chunks}
 
 
 def generate_node(state: RAGState) -> dict:
     """
-    Node 5 — Generate an answer using LangChain ChatGroq with retrieved context.
+    Node 4 — Generate an answer using LangChain ChatGroq with retrieved context.
 
     Builds a message list of [SystemMessage, *history, HumanMessage] and
     invokes the Groq LLM.  The user message contains the numbered context
@@ -366,7 +421,7 @@ def _route_after_park_extraction(state: RAGState) -> str:
     """Rewrite the query only when there is conversation history to draw from."""
     if state.get("conversation_history"):
         return "rewrite_query"
-    return "embed_query"
+    return "retrieve"
 
 
 def _route_after_retrieval(state: RAGState) -> str:
@@ -384,15 +439,13 @@ def _build_graph():
 
     graph.add_node("extract_park", extract_park_node)
     graph.add_node("rewrite_query", rewrite_query_node)
-    graph.add_node("embed_query", embed_query_node)
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("generate", generate_node)
     graph.add_node("no_results", no_results_node)
 
     graph.add_edge(START, "extract_park")
     graph.add_conditional_edges("extract_park", _route_after_park_extraction)
-    graph.add_edge("rewrite_query", "embed_query")
-    graph.add_edge("embed_query", "retrieve")
+    graph.add_edge("rewrite_query", "retrieve")
     graph.add_conditional_edges("retrieve", _route_after_retrieval)
     graph.add_edge("generate", END)
     graph.add_edge("no_results", END)
@@ -404,18 +457,16 @@ def _build_graph():
 
 class RAGPipeline:
     """
-    RAG Pipeline using LangGraph for orchestration and LangChain for prompting.
+    RAG Pipeline using LangGraph for orchestration and native LangChain integrations.
 
-    The pipeline is expressed as a directed graph:
-        extract_park → (rewrite_query →) embed_query → retrieve → generate
+    Graph flow:
+        extract_park → (rewrite_query →) retrieve → generate
 
-    Public interface is identical to the original RAGPipeline so main.py
-    requires no changes.
+    Public interface is identical to the previous RAGPipeline so main.py
+    requires only a one-line import change.
     """
 
     def __init__(self):
-        self.embedding_model = embedding_model
-        self.vector_db = vector_db
         self._graph = _build_graph()
 
     async def answer_question(
@@ -449,7 +500,6 @@ class RAGPipeline:
             "park_code": park_code,
             "active_park_code": park_code,
             "search_query": question,
-            "query_vector": [],
             "context_chunks": [],
             "answer": "",
             "sources": [],
@@ -493,7 +543,6 @@ class RAGPipeline:
             "park_code": park_code,
             "active_park_code": park_code,
             "search_query": question,
-            "query_vector": [],
             "context_chunks": [],
             "answer": "",
             "sources": [],
@@ -547,12 +596,36 @@ class RAGPipeline:
         Returns:
             List of matching document chunks with metadata
         """
-        query_vector = self.embedding_model.encode(query)
-        return self.vector_db.search(
-            query_vector=query_vector,
-            top_k=top_k,
-            park_code=park_code,
+        park_filter = None
+        if park_code:
+            park_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="park_code",
+                        match=MatchValue(value=park_code),
+                    )
+                ]
+            )
+
+        vectorstore = _get_vectorstore()
+        docs_with_scores = vectorstore.similarity_search_with_score(
+            query=query,
+            k=top_k,
+            filter=park_filter,
         )
+
+        return [
+            {
+                "id": i,
+                "score": score,
+                "text": doc.page_content,
+                "park_code": doc.metadata.get("park_code", ""),
+                "park_name": doc.metadata.get("park_name", ""),
+                "source_url": doc.metadata.get("source_url", ""),
+                "chunk_id": doc.metadata.get("chunk_id", ""),
+            }
+            for i, (doc, score) in enumerate(docs_with_scores)
+        ]
 
 
 # Global instance

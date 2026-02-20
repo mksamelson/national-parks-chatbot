@@ -2,23 +2,21 @@
 wheel
 setuptools
 
-# Web framework - updated for cohere v5 compatibility
+# Web framework
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 pydantic>=2.6.0
 
-# Embeddings API (replaces sentence-transformers - saves 300MB RAM!)
-cohere>=5.9.0,<6.0.0
-
-# Vector DB and LLM
-qdrant-client==1.7.3
-groq>=0.4.0
+# Vector DB
+qdrant-client>=1.7.0
 
 # LangGraph + LangChain (RAG pipeline orchestration)
 langgraph>=0.2.0
 langchain-core>=0.3.0
+langchain-cohere>=0.3.0
 langchain-groq>=0.2.0
+langchain-qdrant>=0.2.0
 
-# Testing (used by test_conversation_backend.py)
+# Testing
 requests>=2.31.0
