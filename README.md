@@ -29,12 +29,12 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
 1. **User Query** → FastAPI endpoint
 2. **Query Rewriting** → If conversation history exists, LLM rewrites query to resolve pronouns/references
    - Example: "what wildlife is there?" → "what wildlife is at Zion National Park?"
-3. **Embedding** → Cohere API converts (rewritten) question to 1024-dim vector
-4. **Retrieval** → Qdrant finds top-k similar documents (cosine similarity)
-5. **Generation** → Groq LLM generates answer with retrieved context + conversation history
-6. **Response** → Answer + sources returned to frontend
+3. **Retrieval** → Cohere embeds the query and Qdrant finds top-k similar documents (cosine similarity) in a single step
+4. **Generation** → Groq LLM generates answer with retrieved context + conversation history
+5. **Response** → Answer + sources returned to frontend
 
 ### Key Design Decisions:
+- **Native LangChain integrations** → `CohereEmbeddings`, `QdrantVectorStore`, and `ChatGroq` replace custom wrapper classes, keeping the backend to 2 files (`main.py` + `pipeline.py`)
 - **Smart park context detection** → Automatically filters search to the park being discussed by analyzing USER messages only (ignores assistant responses to prevent context pollution)
 - **Conversational query rewriting** → Resolves pronouns before vector search for accurate context retrieval
 - **API-based embeddings** (Cohere) instead of local models → saves 300MB RAM
@@ -43,20 +43,24 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
 - **Memory footprint** → ~150MB (fits in Render's 512MB free tier)
 
 ### Recent Updates:
+- **February 2026**: Simplified backend from 7 files to 2 files
+  - Replaced custom `embeddings.py`, `vector_db.py`, and `llm.py` wrapper classes with native `langchain-cohere`, `langchain-qdrant`, and `langchain-groq` integrations
+  - Merged `rag.py` into `pipeline.py` — all pipeline logic in one place
+  - Removed `embed_query` node from LangGraph graph; embedding is now handled internally by `QdrantVectorStore`
+  - Deleted stale backup files (`main_bk.py`, `rag_bk.py`)
 - **February 2026**: Fixed conversation context detection algorithm
   - Now correctly prioritizes current question over history
   - Filters to USER messages only (assistant responses no longer pollute context)
   - Processes messages in reverse order (newest first) for accurate context
-  - Added graceful fallback for Qdrant filtering when indexes are unavailable
-  - All 7 comprehensive test cases pass ✅
 
 ## Tech Stack
 
 - **Frontend**: Lovable.ai (React)
 - **Backend**: Python FastAPI on Render (512MB RAM free tier)
-- **Vector Database**: Qdrant Cloud (1GB free tier)
-- **LLM**: Groq API (Llama 3.3 70B, 30 req/min free)
-- **Embeddings**: Cohere API (embed-english-v3.0, 1024-dim, 100 calls/min free)
+- **Pipeline**: LangGraph (orchestration) + LangChain (prompts, integrations)
+- **Vector Database**: Qdrant Cloud (1GB free tier) via `langchain-qdrant`
+- **LLM**: Groq API (Llama 3.3 70B, 30 req/min free) via `langchain-groq`
+- **Embeddings**: Cohere API (embed-english-v3.0, 1024-dim, 100 calls/min free) via `langchain-cohere`
 - **Data Sources**: NPS.gov, NPS API, park brochures
 
 ## Project Structure
@@ -64,25 +68,22 @@ User → Lovable.ai Frontend → Render Backend API (FastAPI)
 ```
 national-parks-chatbot/
 ├── backend/
-│   ├── main.py              # FastAPI application
-│   ├── embeddings.py        # Embedding model loader
-│   ├── vector_db.py         # Qdrant client
-│   ├── llm.py               # Groq API integration
-│   ├── rag.py               # RAG pipeline
+│   ├── main.py              # FastAPI application + endpoints
+│   ├── pipeline.py          # LangGraph RAG pipeline (embeddings, retrieval, generation)
 │   ├── requirements.txt     # Backend dependencies
-│   └── render.yaml          # Render deployment config
+│   └── runtime.txt          # Python version for Render
 ├── data_ingestion/
 │   ├── scrape_nps.py        # NPS website scraper
 │   ├── process_pdfs.py      # PDF text extraction
 │   ├── chunk_documents.py   # Document chunking
-│   ├── create_embeddings.py # Generate & upload embeddings
+│   ├── create_embeddings.py # Generate & upload embeddings to Qdrant
 │   └── requirements.txt     # Data processing dependencies
 ├── data/
 │   ├── raw/                 # Scraped and downloaded data
 │   ├── processed/           # Cleaned and chunked data
 │   └── metadata/            # Park metadata
+├── render.yaml              # Render deployment config
 ├── .gitignore
-├── PLAN.md                  # Detailed implementation plan
 └── README.md                # This file
 ```
 
@@ -90,7 +91,7 @@ national-parks-chatbot/
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+
 - Git
 
 ### 1. Clone the Repository
@@ -170,24 +171,23 @@ uvicorn main:app --reload
 
 The API will be available at `http://localhost:8000`
 
-Note: The RAG pipeline uses lazy loading - it loads on first request (not startup) to enable fast port binding on Render.
+Note: The RAG pipeline uses lazy loading — it initializes on first request (not at startup) to enable fast port binding on Render.
 
 ### 6. Deploy Backend to Render
 
 1. Push code to GitHub
 2. Connect GitHub repo to Render
 3. Set environment variables in Render dashboard
-4. Deploy!
+4. Deploy — `render.yaml` configures everything automatically
 
 ### 7. Build Frontend in Lovable.ai
 
-1. Use the frontend specifications from `PLAN.md`
-2. Connect to your Render backend URL
-3. Deploy frontend
+1. Connect to your Render backend URL
+2. Deploy frontend
 
 ## Environment Variables
 
-Create a `.env` file in the root directory (not committed to git):
+Create a `.env` file in `backend/` (not committed to git):
 
 ```bash
 # Cohere API (for embeddings)
@@ -200,11 +200,9 @@ GROQ_API_KEY=your_groq_api_key
 QDRANT_URL=https://your-cluster.qdrant.io
 QDRANT_API_KEY=your_qdrant_api_key
 
-# NPS API (optional, for data collection)
+# NPS API (optional, for data collection only)
 NPS_API_KEY=your_nps_api_key
 ```
-
-**Important:** Strip any whitespace/newlines when copying API keys. All keys are automatically `.strip()`'ed in the code to handle copy/paste errors.
 
 ## API Endpoints
 
@@ -241,15 +239,15 @@ NPS_API_KEY=your_nps_api_key
 **Conversation History Format:**
 - Each message: `{"role": "user" | "assistant", "content": "string"}`
 - Maximum 20 messages (10 exchanges) to stay within token limits
-- Optional - leave empty or omit for single-turn questions
-- Backend is stateless - client manages conversation state
+- Optional — leave empty or omit for single-turn questions
+- Backend is stateless; client manages conversation state
 
 **How Conversational Context Works:**
 
 The system uses two techniques to maintain conversation context:
 
-1. **Park Context Detection** - Automatically detects which park you're discussing and filters search results to ONLY that park
-2. **Query Rewriting** - Rewrites ambiguous questions to resolve pronouns and references
+1. **Park Context Detection** — Automatically detects which park you're discussing and filters search results to only that park
+2. **Query Rewriting** — Rewrites ambiguous questions to resolve pronouns and references
 
 **Example conversation:**
 1. User: "Tell me about Glacier National Park"
@@ -258,39 +256,24 @@ The system uses two techniques to maintain conversation context:
    - **Park filter:** Glacier (auto-detected)
    - **Query rewritten:** "What wildlife can I see at Glacier National Park?"
    - **Search:** Only Glacier documents retrieved
-   - **Result:** Accurate Glacier-specific wildlife information
 3. User: "Are they dangerous?"
    - **Park filter:** Still Glacier
    - **Query rewritten:** "Are the animals at Glacier National Park dangerous?"
-   - **Search:** Only Glacier safety documents
-   - **Result:** Glacier-specific safety information
 
-**Key benefit:** Once you mention a park, all follow-up questions automatically focus on that park until you mention a different park. This prevents mixing information from multiple parks.
+**Key benefit:** Once you mention a park, all follow-up questions automatically focus on that park until you mention a different park.
 
-**Example: Multi-turn conversation flow**
-```python
-# First question (no history)
-response1 = post("/api/chat", {"question": "Tell me about Yellowstone"})
+### Streaming Chat Endpoint
 
-# Follow-up (with history)
-response2 = post("/api/chat", {
-  "question": "What hiking trails are there?",  # "there" = Yellowstone (from context)
-  "conversation_history": [
-    {"role": "user", "content": "Tell me about Yellowstone"},
-    {"role": "assistant", "content": response1['answer']}
-  ]
-})
+`POST /api/chat/stream` - Returns tokens as Server-Sent Events (SSE)
 
-# Another follow-up (understands pronouns)
-response3 = post("/api/chat", {
-  "question": "Which one is best for beginners?",  # "one" = hiking trail (from context)
-  "conversation_history": [
-    {"role": "user", "content": "Tell me about Yellowstone"},
-    {"role": "assistant", "content": response1['answer']},
-    {"role": "user", "content": "What hiking trails are there?"},
-    {"role": "assistant", "content": response2['answer']}
-  ]
-})
+Request body is identical to `/api/chat`. The frontend receives tokens progressively as the LLM generates them.
+
+SSE event format:
+```
+data: {"type": "token",  "content": "<text>"}
+data: {"type": "done",   "sources": [...], "num_sources": N}
+data: {"type": "error",  "message": "<msg>"}
+data: [DONE]
 ```
 
 ### Search Endpoint
@@ -314,11 +297,11 @@ response3 = post("/api/chat", {
 
 **Port scan timeout:**
 - Cause: App takes too long to bind to port
-- Solution: Already implemented - lazy loading ensures <2 second startup
+- Solution: Already implemented — lazy loading ensures <2 second startup
 
 **Memory exceeded on Render:**
 - Cause: Using local embedding models
-- Solution: Already implemented - using Cohere API instead
+- Solution: Already implemented — using Cohere API instead (no local model loaded)
 
 **Vector dimension mismatch:**
 - Error: "expected dim: 1024, got 384"
@@ -327,7 +310,7 @@ response3 = post("/api/chat", {
 
 **API key errors:**
 - Error: "Illegal header value"
-- Solution: API keys auto-stripped of whitespace, but verify .env file has no extra newlines
+- Solution: API keys are auto-stripped of whitespace, but verify `.env` file has no extra newlines
 
 **Cohere rate limit:**
 - Error: "trial token rate limit exceeded"
@@ -348,32 +331,6 @@ python check_qdrant.py
 
 ## Development
 
-### Running Tests
-
-**Backend conversation memory tests:**
-```bash
-# Start backend server in one terminal
-cd backend
-uvicorn main:app --reload
-
-# Run tests in another terminal
-python test_conversation_backend.py
-```
-
-The test suite includes 7 comprehensive tests:
-1. Basic question without history
-2. Follow-up question with conversation history
-3. Extended follow-up maintaining context
-4. **Assistant messages don't change context** (critical test)
-5. Current question overrides history
-6. Most recent user mention takes precedence
-7. Extended conversation (5+ turns) maintains context
-
-**Unit tests:**
-```bash
-pytest tests/
-```
-
 ### Code Formatting
 
 ```bash
@@ -392,7 +349,7 @@ All services are on free tiers:
 - **Total Monthly Cost**: $0
 
 ### Why Free Tier Works:
-- Cohere API eliminates need for local embeddings models (saves ~300MB RAM)
+- Cohere API eliminates need for local embedding models (saves ~300MB RAM)
 - Lazy loading enables <2 second startup (critical for Render port binding)
 - Memory-optimized architecture fits in 512MB (vs 400-500MB for local models)
 - Rate limits are sufficient for typical usage patterns
