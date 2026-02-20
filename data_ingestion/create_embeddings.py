@@ -4,6 +4,7 @@ Now using Cohere API (no local models = low memory!)
 """
 import os
 import json
+import time
 from pathlib import Path
 from typing import List, Dict
 from tqdm import tqdm
@@ -132,8 +133,6 @@ def initialize_cohere() -> cohere.Client:
 
 def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> List[List[float]]:
     """Generate embeddings for all chunks using Cohere API with rate limiting"""
-    import time
-
     print(f"Generating embeddings for {len(chunks)} chunks using Cohere...")
     print("(Free tier rate limit: 100k tokens/min - adding delays to stay under limit)")
 
@@ -167,8 +166,8 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
             if i == 0 and len(response.embeddings) > 0:
                 first_dim = len(response.embeddings[0])
                 print(f"\n✓ Cohere API working! Embedding dimension: {first_dim}")
-                if first_dim != 1024:
-                    print(f"❌ ERROR: Expected 1024-dim, got {first_dim}-dim!")
+                if first_dim != EMBEDDING_DIM:
+                    print(f"❌ ERROR: Expected {EMBEDDING_DIM}-dim, got {first_dim}-dim!")
                     print("Check your Cohere model and API key.")
                     exit(1)
 
@@ -194,8 +193,8 @@ def generate_embeddings(chunks: List[Dict], cohere_client: cohere.Client) -> Lis
     if len(all_embeddings) > 0:
         actual_dim = len(all_embeddings[0])
         print(f"✓ Final check: Embedding dimension = {actual_dim}")
-        if actual_dim != 1024:
-            print(f"❌ CRITICAL ERROR: Embeddings are {actual_dim}-dim, not 1024-dim!")
+        if actual_dim != EMBEDDING_DIM:
+            print(f"❌ CRITICAL ERROR: Embeddings are {actual_dim}-dim, not {EMBEDDING_DIM}-dim!")
             print("Something went wrong with Cohere API.")
             exit(1)
 

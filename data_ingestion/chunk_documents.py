@@ -2,7 +2,6 @@
 Chunk scraped documents into smaller pieces for embedding
 """
 import json
-import os
 from pathlib import Path
 from typing import List, Dict
 from tqdm import tqdm
@@ -10,7 +9,6 @@ from tqdm import tqdm
 # Configuration
 INPUT_DIR = Path("../data/raw")
 OUTPUT_DIR = Path("../data/processed")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CHUNK_SIZE = 800  # tokens (approximate by characters)
 CHUNK_OVERLAP = 200  # overlap between chunks
@@ -252,6 +250,7 @@ def process_pdf_texts():
 
 def process_all_parks():
     """Process all park files and create chunks"""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     park_files = list(INPUT_DIR.glob("*.json"))
 
     # Exclude the combined file
