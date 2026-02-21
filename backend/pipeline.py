@@ -379,12 +379,18 @@ def generate_node(state: RAGState) -> dict:
             f"they are referring to {park_name}.\n\n"
         )
 
+    park_restriction = (
+        f"Answer ONLY about {park_name} using ONLY the context above. "
+        f"Do not mention, compare, or reference any other national parks."
+        if active_park_code else
+        "Answer using only the context provided above."
+    )
+
     user_content = (
         f"{park_context_statement}"
         f"Context from National Parks Service:\n\n{context_text}\n\n"
         f"User Question: {question}\n\n"
-        f"Please answer the question based on the context provided above. "
-        f"Remember that all context is about {park_name}."
+        f"{park_restriction}"
     )
 
     # Assemble messages: system + conversation history + final user prompt
