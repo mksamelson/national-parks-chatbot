@@ -184,18 +184,24 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
     """
     Detect which park is being discussed.
 
-    Priority order (prevents assistant responses from hijacking context):
-      1. Current question  — allows the user to explicitly switch parks
-      2. Most recent user message mentioning a park
-    Only user messages are checked; assistant messages are intentionally ignored
-    to avoid context drift when the assistant compares multiple parks.
+    Priority order:
+      1. Current question — user explicitly names the park (highest priority)
+      2. Most recent user message in history containing a park name
+      3. Most recent assistant message — last resort, used only when it
+         unambiguously mentions a single park code.  This handles the common
+         case where the user selected a park via the UI dropdown so no park
+         name ever appears in their typed messages, but the prior assistant
+         response was filtered to that park.  If the assistant mentioned
+         multiple parks (comparison response), this step is skipped.
     """
+    # 1. Current question
     question_lower = question.lower()
     for park_name, code in PARK_MAPPINGS.items():
         if park_name in question_lower:
             logger.info(f"Park detected in current question: {park_name} ({code})")
             return code
 
+    # 2. User messages in recent history
     user_messages = [m for m in conversation_history[-6:] if m.get("role") == "user"]
     for msg in reversed(user_messages):
         msg_lower = msg["content"].lower()
@@ -203,6 +209,20 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
             if park_name in msg_lower:
                 logger.info(f"Park detected from user history: {park_name} ({code})")
                 return code
+
+    # 3. Last assistant message (single-park match only — avoids false positives)
+    assistant_messages = [m for m in conversation_history[-6:] if m.get("role") == "assistant"]
+    if assistant_messages:
+        last_lower = assistant_messages[-1]["content"].lower()
+        matched_codes = {
+            code
+            for park_name, code in PARK_MAPPINGS.items()
+            if park_name in last_lower
+        }
+        if len(matched_codes) == 1:
+            code = next(iter(matched_codes))
+            logger.info(f"Park detected from last assistant message (single match): {code}")
+            return code
 
     logger.info("No park detected")
     return None
