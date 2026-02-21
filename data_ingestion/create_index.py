@@ -34,14 +34,14 @@ def create_park_code_index():
             field_name="park_code",
             field_schema=PayloadSchemaType.KEYWORD,
         )
-        print("✓ Index created successfully.")
+        print("OK Index created successfully.")
         print("  Qdrant will now filter by park_code without falling back to full scans.")
         return True
     except Exception as e:
         if "already exists" in str(e).lower():
-            print("✓ Index already exists — nothing to do.")
+            print("OK Index already exists - nothing to do.")
             return True
-        print(f"✗ Failed to create index: {e}")
+        print(f"FAILED to create index: {e}")
         return False
 
 
