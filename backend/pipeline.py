@@ -293,11 +293,33 @@ def retrieve_node(state: RAGState) -> dict:
         )
 
     vectorstore = _get_vectorstore()
-    docs_with_scores = vectorstore.similarity_search_with_score(
-        query=search_query,
-        k=top_k,
-        filter=park_filter,
-    )
+    try:
+        docs_with_scores = vectorstore.similarity_search_with_score(
+            query=search_query,
+            k=top_k,
+            filter=park_filter,
+        )
+    except Exception as e:
+        # Qdrant requires a keyword index on park_code for filtered searches.
+        # If the index is missing, fall back to an unfiltered search and filter
+        # the results manually in Python.  Run data_ingestion/create_index.py
+        # to create the index and make this fallback unnecessary.
+        if active_park_code and "Index required" in str(e):
+            logger.warning(
+                "Qdrant park_code index missing — falling back to unfiltered search "
+                "with manual filtering. Run data_ingestion/create_index.py to fix permanently."
+            )
+            docs_all = vectorstore.similarity_search_with_score(
+                query=search_query,
+                k=top_k * 3,
+                filter=None,
+            )
+            docs_with_scores = [
+                (doc, score) for doc, score in docs_all
+                if doc.metadata.get("park_code") == active_park_code
+            ][:top_k]
+        else:
+            raise
 
     context_chunks = [
         {

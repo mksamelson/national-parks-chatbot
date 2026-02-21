@@ -86,25 +86,37 @@ def check_qdrant():
     # Test search
     print("\n5. Testing vector search...")
     try:
-        # Create a simple test query vector (all zeros for simplicity)
         test_vector = [0.0] * vector_dim
 
-        results = client.search(
+        results = client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=test_vector,
-            limit=3
+            query=test_vector,
+            limit=3,
         )
 
-        print(f"   ✓ Search works! Retrieved {len(results)} results")
+        print(f"   ✓ Search works! Retrieved {len(results.points)} results")
 
-        if results:
+        if results.points:
             print(f"\n   Sample result:")
-            print(f"   - Park: {results[0].payload.get('park_name', 'N/A')}")
-            print(f"   - Text preview: {results[0].payload.get('text', '')[:80]}...")
+            print(f"   - Park: {results.points[0].payload.get('park_name', 'N/A')}")
+            print(f"   - Text preview: {results.points[0].payload.get('text', '')[:80]}...")
 
     except Exception as e:
         print(f"   ✗ Search failed: {e}")
         return False
+
+    # Check park_code index
+    print("\n6. Checking park_code payload index...")
+    try:
+        info = client.get_collection(COLLECTION_NAME)
+        indexes = info.payload_schema or {}
+        if "park_code" in indexes:
+            print("   ✓ park_code keyword index exists — park filtering will work correctly")
+        else:
+            print("   ⚠ park_code index missing — filtered searches will fall back to manual filtering")
+            print("   → Run: python create_index.py  to create the index")
+    except Exception as e:
+        print(f"   ⚠ Could not check indexes: {e}")
 
     # Summary
     print("\n" + "=" * 60)
