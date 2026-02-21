@@ -131,6 +131,7 @@ class ChatResponse(BaseModel):
     sources: List[Source]
     question: str
     num_sources: int
+    active_park_code: Optional[str] = None
 
 
 class SearchResult(BaseModel):

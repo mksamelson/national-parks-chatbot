@@ -541,6 +541,7 @@ class RAGPipeline:
             "sources": result["sources"],
             "question": question,
             "num_sources": result["num_sources"],
+            "active_park_code": result.get("active_park_code"),
         }
 
     async def astream_answer(
