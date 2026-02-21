@@ -180,37 +180,52 @@ class RAGState(TypedDict):
 
 # ─────────────────────────── Helper ───────────────────────────────────────────
 
+def find_park_in_text(text: str) -> Optional[str]:
+    """
+    Scan a single text string for a known park name and return its 4-letter code.
+
+    This is the canonical park-detection function.  It is called on every
+    Human Message before the query is sent to Qdrant, and its result is stored
+    in the API response (active_park_code) so that follow-up questions that use
+    pronouns ("there", "it", "the park") can be resolved without the user
+    having to repeat the park name.
+
+    Returns the first matching park code, or None if no park name is found.
+    """
+    text_lower = text.lower()
+    for park_name, code in PARK_MAPPINGS.items():
+        if park_name in text_lower:
+            return code
+    return None
+
+
 def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[str]:
     """
-    Detect which park is being discussed.
+    Detect which park is being discussed using text-only signals.
 
-    Priority order:
-      1. Current question — user explicitly names the park (highest priority)
-      2. Most recent user message in history containing a park name
-      3. Most recent assistant message — last resort, used only when it
-         unambiguously mentions a single park code.  This handles the common
-         case where the user selected a park via the UI dropdown so no park
-         name ever appears in their typed messages, but the prior assistant
-         response was filtered to that park.  If the assistant mentioned
-         multiple parks (comparison response), this step is skipped.
+    Priority order (all text-based — the dropdown park_code is intentionally
+    excluded here and treated as a last-resort fallback in extract_park_node):
+      1. Current Human Message  — user explicitly names the park right now
+      2. Recent Human Messages in history — user named the park in a prior turn
+      3. Last Assistant message — used only when it unambiguously contains a
+         single park name, which happens when the prior response was filtered
+         to one park.  Skipped if the assistant mentioned multiple parks.
     """
     # 1. Current question
-    question_lower = question.lower()
-    for park_name, code in PARK_MAPPINGS.items():
-        if park_name in question_lower:
-            logger.info(f"Park detected in current question: {park_name} ({code})")
-            return code
+    code = find_park_in_text(question)
+    if code:
+        logger.info(f"Park detected in current question: {code}")
+        return code
 
-    # 2. User messages in recent history
+    # 2. Human Messages in recent history (most recent first)
     user_messages = [m for m in conversation_history[-6:] if m.get("role") == "user"]
     for msg in reversed(user_messages):
-        msg_lower = msg["content"].lower()
-        for park_name, code in PARK_MAPPINGS.items():
-            if park_name in msg_lower:
-                logger.info(f"Park detected from user history: {park_name} ({code})")
-                return code
+        code = find_park_in_text(msg["content"])
+        if code:
+            logger.info(f"Park detected from user history: {code}")
+            return code
 
-    # 3. Last assistant message (single-park match only — avoids false positives)
+    # 3. Last Assistant message (single-park match only — avoids false positives)
     assistant_messages = [m for m in conversation_history[-6:] if m.get("role") == "assistant"]
     if assistant_messages:
         last_lower = assistant_messages[-1]["content"].lower()
@@ -224,7 +239,6 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
             logger.info(f"Park detected from last assistant message (single match): {code}")
             return code
 
-    logger.info("No park detected")
     return None
 
 
@@ -232,18 +246,28 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
 
 def extract_park_node(state: RAGState) -> dict:
     """
-    Node 1 — Detect the active park from the question and conversation history.
+    Node 1 — Detect the active park from the Human Message text.
 
-    If the caller already supplied an explicit park_code, that takes precedence.
-    Otherwise, scan the current question then recent user messages for a park name.
+    Text detection (find_park_in_text / _detect_park) always runs first and
+    covers three cases in priority order:
+      1. Park name in the current question
+      2. Park name in a prior Human Message
+      3. Unambiguous park name in the last Assistant message
+
+    The explicit park_code (forwarded by the frontend from the previous turn,
+    or set via the park dropdown) is used only as a last-resort fallback when
+    no park name appears anywhere in the conversation text.  This ensures that
+    what the user *types* always overrides any UI selection.
     """
-    if state.get("park_code"):
-        return {"active_park_code": state["park_code"]}
-
     active_park_code = _detect_park(
         state["question"],
         state.get("conversation_history") or [],
     )
+
+    if not active_park_code and state.get("park_code"):
+        active_park_code = state["park_code"]
+        logger.info(f"Park from explicit park_code fallback: {active_park_code}")
+
     logger.info(f"Active park: {active_park_code or 'none (searching all parks)'}")
     return {"active_park_code": active_park_code}
 
@@ -546,7 +570,7 @@ class RAGPipeline:
             "top_k": top_k,
             "conversation_history": conversation_history or [],
             "park_code": park_code,
-            "active_park_code": park_code,
+            "active_park_code": None,
             "search_query": question,
             "context_chunks": [],
             "answer": "",
@@ -590,7 +614,7 @@ class RAGPipeline:
             "top_k": top_k,
             "conversation_history": conversation_history or [],
             "park_code": park_code,
-            "active_park_code": park_code,
+            "active_park_code": None,
             "search_query": question,
             "context_chunks": [],
             "answer": "",
