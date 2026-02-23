@@ -206,10 +206,8 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
     Priority order (all text-based — the dropdown park_code is intentionally
     excluded here and treated as a last-resort fallback in extract_park_node):
       1. Current Human Message  — user explicitly names the park right now
-      2. Recent Human Messages in history — user named the park in a prior turn
-      3. Last Assistant message — used only when it unambiguously contains a
-         single park name, which happens when the prior response was filtered
-         to one park.  Skipped if the assistant mentioned multiple parks.
+      2. Recent Human Messages in history — user named the park in a prior HumanMessage
+  
     """
     # 1. Current question
     code = find_park_in_text(question)
@@ -402,39 +400,54 @@ def generate_node(state: RAGState) -> dict:
     active_park_code = state.get("active_park_code")
     history = state.get("conversation_history") or []
 
+    # Safety net: if a park is active, strip any chunks from other parks before
+    # the LLM ever sees them.  This covers the rare case where retrieval fallback
+    # returned mixed-park results despite the Qdrant filter.
+    if active_park_code:
+        filtered = [c for c in context_chunks if c.get("park_code") == active_park_code]
+        if filtered:
+            context_chunks = filtered
+
     # Format retrieved chunks as numbered sources
     context_text = "\n\n".join([
         f"[Source {i+1} - {chunk['park_name']}]\n{chunk['text']}"
         for i, chunk in enumerate(context_chunks)
     ])
 
-    park_name = (
-        context_chunks[0].get("park_name", "the park being discussed")
-        if context_chunks else "national parks"
-    )
+    # Resolve the display name from the code so it's always consistent
+    if active_park_code:
+        park_name = CODE_TO_NAME.get(active_park_code,
+                    context_chunks[0].get("park_name", "the park") if context_chunks else "the park")
+    else:
+        park_name = context_chunks[0].get("park_name", "national parks") if context_chunks else "national parks"
 
-    # Explicit park context statement keeps the LLM focused on the right park
-    park_context_statement = ""
-    if active_park_code and context_chunks:
-        park_context_statement = (
-            f"IMPORTANT CONTEXT: The user is currently asking about {park_name}. "
-            f"All context provided below is specifically about {park_name}. "
-            f"When the user uses words like 'there', 'it', or 'the park', "
-            f"they are referring to {park_name}.\n\n"
+    # Build prompt instructions that sandwich the context.
+    # Placing a clear scope instruction BEFORE the context (so the LLM reads it
+    # first) and AFTER the question (where LLMs weight instructions most heavily)
+    # is more reliable than a single trailing reminder.
+    if active_park_code:
+        pre_context = (
+            f"SCOPE: This conversation is about {park_name}.\n"
+            f"Any pronoun such as 'there', 'it', or 'the park' refers to {park_name}.\n"
+            f"Read only the context below. Ignore any knowledge about other parks.\n\n"
         )
-
-    park_restriction = (
-        f"Answer ONLY about {park_name} using ONLY the context above. "
-        f"Do not mention, compare, or reference any other national parks."
-        if active_park_code else
-        "Answer using only the context provided above."
-    )
+        post_question = (
+            f"\n\nRULES:\n"
+            f"1. Answer ONLY about {park_name}.\n"
+            f"2. Use ONLY the context provided above — do not add outside knowledge.\n"
+            f"3. Do NOT mention, compare, or reference any other national park.\n"
+            f"4. If the context does not contain enough information, say so rather "
+            f"than pulling in details from other parks."
+        )
+    else:
+        pre_context = ""
+        post_question = "\n\nAnswer using only the context provided above."
 
     user_content = (
-        f"{park_context_statement}"
+        f"{pre_context}"
         f"Context from National Parks Service:\n\n{context_text}\n\n"
-        f"User Question: {question}\n\n"
-        f"{park_restriction}"
+        f"User Question: {question}"
+        f"{post_question}"
     )
 
     # Assemble messages: system + conversation history + final user prompt
