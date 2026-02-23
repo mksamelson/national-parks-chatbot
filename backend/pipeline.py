@@ -215,26 +215,32 @@ def _detect_park(question: str, conversation_history: List[Dict]) -> Optional[st
         logger.info(f"Park detected in current question: {code}")
         return code
 
-    # 2. Human Messages in recent history (most recent first)
-    user_messages = [m for m in conversation_history[-6:] if m.get("role") == "user"]
+    # 2. ALL Human Messages in history (most recent first).
+    # Scanning the full user history (not just the last 6 total messages) ensures
+    # the original park mention — e.g. "Tell me about Zion National Park" from turn 1
+    # of a long conversation — is never missed.
+    user_messages = [m for m in conversation_history if m.get("role") == "user"]
     for msg in reversed(user_messages):
         code = find_park_in_text(msg["content"])
         if code:
             logger.info(f"Park detected from user history: {code}")
             return code
 
-    # 3. Last Assistant message (single-park match only — avoids false positives)
-    assistant_messages = [m for m in conversation_history[-6:] if m.get("role") == "assistant"]
-    if assistant_messages:
-        last_lower = assistant_messages[-1]["content"].lower()
+    # 3. Assistant messages — single-park match only.
+    # Check from OLDEST to NEWEST: early responses were generated when detection
+    # was working correctly and are more likely to mention only one park.
+    # Later assistant messages may be contaminated by prior mixed-park responses.
+    assistant_messages = [m for m in conversation_history if m.get("role") == "assistant"]
+    for msg in assistant_messages:
+        lower = msg["content"].lower()
         matched_codes = {
             code
             for park_name, code in PARK_MAPPINGS.items()
-            if park_name in last_lower
+            if park_name in lower
         }
         if len(matched_codes) == 1:
             code = next(iter(matched_codes))
-            logger.info(f"Park detected from last assistant message (single match): {code}")
+            logger.info(f"Park detected from assistant message (single match): {code}")
             return code
 
     return None
@@ -399,6 +405,31 @@ def generate_node(state: RAGState) -> dict:
     context_chunks = state["context_chunks"]
     active_park_code = state.get("active_park_code")
     history = state.get("conversation_history") or []
+
+    # Last-chance park detection: if extract_park_node returned None (e.g. user
+    # never typed the park name and the dropdown code wasn't forwarded), scan the
+    # full conversation history one more time before building the prompt.
+    # This breaks the cascading-failure cycle where a prior mixed-park response
+    # poisons later assistant-message detection.
+    if not active_park_code and history:
+        # Try every user message first (most reliable signal)
+        for msg in reversed(history):
+            if msg.get("role") == "user":
+                code = find_park_in_text(msg.get("content", ""))
+                if code:
+                    active_park_code = code
+                    logger.info(f"Park inferred in generate_node from user history: {code}")
+                    break
+        # If still None, accept the first assistant message that names a single park
+        if not active_park_code:
+            for msg in history:
+                if msg.get("role") == "assistant":
+                    lower = msg["content"].lower()
+                    matched = {c for n, c in PARK_MAPPINGS.items() if n in lower}
+                    if len(matched) == 1:
+                        active_park_code = next(iter(matched))
+                        logger.info(f"Park inferred in generate_node from assistant history: {active_park_code}")
+                        break
 
     # Safety net: if a park is active, strip any chunks from other parks before
     # the LLM ever sees them.  This covers the rare case where retrieval fallback
