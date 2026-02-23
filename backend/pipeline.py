@@ -324,10 +324,30 @@ def retrieve_node(state: RAGState) -> dict:
 
     QdrantVectorStore handles embedding internally, so no separate embed_query
     node is needed.  Filters by active_park_code when a park has been detected.
+
+    If extract_park_node found no park in the user's text, this node checks the
+    rewritten search_query as a last text-based signal: rewrite_query_node feeds
+    conversation history to the LLM and instructs it to include the park name,
+    so a pronoun-only question like "what's the weather there?" often becomes
+    "What is the weather at Zion NP in June?" in search_query.  Detecting the
+    park here also propagates active_park_code to generate_node so that node's
+    chunk pre-filter and scoped prompt engage correctly.
     """
     search_query = state["search_query"]
     top_k = state["top_k"]
     active_park_code = state.get("active_park_code")
+
+    # If extract_park_node couldn't determine the park from the raw user text,
+    # try the rewritten query.  The rewrite LLM is instructed to include the
+    # park name when resolving pronouns, so this catches the common case where
+    # a user types "what is the weather there?" after a Zion conversation.
+    inferred_from_query = False
+    if not active_park_code:
+        code = find_park_in_text(search_query)
+        if code:
+            active_park_code = code
+            inferred_from_query = True
+            logger.info(f"Park inferred from rewritten query '{search_query}': {code}")
 
     park_filter = None
     if active_park_code:
@@ -390,7 +410,13 @@ def retrieve_node(state: RAGState) -> dict:
         else:
             logger.info(f"All results from expected park: {active_park_code}")
 
-    return {"context_chunks": context_chunks}
+    result: dict = {"context_chunks": context_chunks}
+    # Propagate inferred park code to generate_node so it can apply the
+    # scoped prompt and chunk pre-filter even when extract_park_node found
+    # no park name in the user's raw text.
+    if inferred_from_query:
+        result["active_park_code"] = active_park_code
+    return result
 
 
 def generate_node(state: RAGState) -> dict:
