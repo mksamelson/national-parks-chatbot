@@ -478,6 +478,30 @@ def generate_node(state: RAGState) -> dict:
     else:
         park_name = context_chunks[0].get("park_name", "national parks") if context_chunks else "national parks"
 
+    # Sanitize assistant messages that mention other parks.
+    # This prevents contaminated prior responses from leaking into the LLM's
+    # context even when retrieval is correctly filtered to the active park.
+    if active_park_code:
+        sanitized_history = []
+        for msg in history:
+            if msg["role"] == "user":
+                sanitized_history.append(msg)
+            else:  # assistant
+                lower = msg["content"].lower()
+                other_parks = {
+                    code
+                    for name, code in PARK_MAPPINGS.items()
+                    if name in lower and code != active_park_code
+                }
+                if other_parks:
+                    sanitized_history.append({
+                        "role": "assistant",
+                        "content": f"[Previous response about {park_name}]",
+                    })
+                else:
+                    sanitized_history.append(msg)
+        history = sanitized_history
+
     # Build prompt instructions that sandwich the context.
     # Placing a clear scope instruction BEFORE the context (so the LLM reads it
     # first) and AFTER the question (where LLMs weight instructions most heavily)
@@ -507,8 +531,25 @@ def generate_node(state: RAGState) -> dict:
         f"{post_question}"
     )
 
+    # Use a park-scoped SystemMessage when a park is active to remove the
+    # base prompt's "reference prior turns" language, which can prime the LLM
+    # to draw from contaminated history. Fall back to SYSTEM_PROMPT for
+    # general (no active park) queries.
+    if active_park_code:
+        system_content = (
+            f"You are a helpful National Parks expert assistant. "
+            f"This conversation is specifically about {park_name}.\n\n"
+            f"STRICT RULES — follow these above all else:\n"
+            f"1. Answer ONLY about {park_name}.\n"
+            f"2. Use ONLY the provided context. No outside knowledge.\n"
+            f"3. Do NOT mention, compare, or reference any other national park.\n"
+            f"4. Be friendly and accurate. Prioritize visitor safety when relevant."
+        )
+    else:
+        system_content = SYSTEM_PROMPT
+
     # Assemble messages: system + conversation history + final user prompt
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    messages = [SystemMessage(content=system_content)]
     for msg in history:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
